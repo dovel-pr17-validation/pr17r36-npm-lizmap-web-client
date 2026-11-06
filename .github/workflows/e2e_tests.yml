@@ -1,0 +1,403 @@
+name: "🎳 End2end"
+on:
+  pull_request:
+    branches:
+      - master
+      - release_3_*
+  # allow to run manually
+  workflow_dispatch:
+
+jobs:
+  end2end:
+    name: "E2E ${{ matrix.name }} shard ${{ matrix.shard }}/3 (QGIS ${{ matrix.qgis-server }} PG ${{ matrix.pg-postgis }} PHP ${{ matrix.php }})"
+    permissions:
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each (name x shard) pair is an independent job with its own isolated
+        # docker stack (own PostgreSQL), so sharding the @write / no-tag tests
+        # across shards is race-free. The per-config fields (php, pg, qgis...)
+        # are attached to every shard of a given name via the include entries.
+        name: ["LEGACY", "STABLE", "BLEEDING_EDGE", "QJAZZ_UNSTABLE"]
+        shard: [1, 2, 3]
+        include:
+          - name: "LEGACY"
+            php: "8.2"
+            pg-postgis: "14-3"
+            qgis-server: "qgis-3.40"
+            update-projects: "FALSE"
+          - name: "STABLE"
+            php: "8.3"
+            pg-postgis: "15-3"
+            qgis-server: "qgis-3.40"
+            update-projects: "FALSE"
+          - name: "BLEEDING_EDGE"
+            php: "8.5"
+            pg-postgis: "18-3"
+            qgis-server: "qgis-3.44"
+            update-projects: "TRUE"
+          - name: "QJAZZ_UNSTABLE"
+            php: "8.5"
+            pg-postgis: "18-3"
+            qgis-server: "qgis-ltr-unstable"
+            update-projects: "TRUE"
+    env:
+      PLAYWRIGHT_FORCE_TTY: true
+      PLAYWRIGHT_LIST_PRINT_STEPS: true
+      PLAYWRIGHT_JSON_OUTPUT_DIR: ${{ github.workspace }}/tests/end2end/playwright-report
+      PLAYWRIGHT_OPTIONS: --project=end2end
+      FORCE_COLOR: true
+      DOCKERHUB_TOKEN_SET: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+
+      - name: Login to Docker Hub
+        if: ${{ github.secret_source == 'Actions' && env.DOCKERHUB_TOKEN_SET == 'true' }}
+        uses: docker/login-action@v4
+        env:
+          ACTIONS_STEP_DEBUG: true
+        with:
+          username: "3liz"
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Make environment and show Lizmap versions
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+          LZMPOSTGISVERSION: ${{ matrix.pg-postgis }}
+          LZMQGSRVVERSION: ${{ matrix.qgis-server }}
+        run: |
+          mkdir -p ${{env.PLAYWRIGHT_JSON_OUTPUT_DIR}}
+          make env
+          cat .env
+
+      - name: Read environment file and set variables
+        run: cat .env >> "$GITHUB_ENV"
+
+       # For testing only
+      - name: Update all QGIS projects to QGIS Desktop ${{ matrix.qgis-server }} by opening them and rewriting them
+        if: |
+          matrix.update-projects == 'TRUE'
+        run: |
+          make upgrade-projects
+          git status
+          git diff qgis-projects/tests/
+
+      - name: Show QGIS server environment
+        run: |
+          make show-qgis-server-versions
+
+      - name: Run docker compose
+        run: |
+          make env
+          docker compose version
+          echo "Building image"
+          docker compose build --quiet
+          echo "Starting docker stack - wait for healthy states"
+          docker compose up -d --quiet-pull --wait --wait-timeout 300
+          docker compose ps
+
+      - name: Check about QGIS Serve status (direct)
+        id: qgis-server-status-direct
+        run: |
+          curl \
+            -N \
+            --retry 30 \
+            --retry-delay 5 \
+            "http://localhost:8131/lizmap/server.json" \
+            -o /tmp/test-qgis-server-direct.json
+          cat /tmp/test-qgis-server-direct.json
+
+      - name: Check about QGIS Server status
+        id: qgis-server-status
+        run: |
+          curl \
+            --user 'admin:admin' \
+            --retry 30 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            -N \
+            "http://localhost:8130/index.php/view/app/metadata" \
+            -o /tmp/test-qgis-server.json
+
+          cat /tmp/test-qgis-server.json | jq .qgis_server_info
+          qgis_info=$(cat /tmp/test-qgis-server.json | jq --raw-output '.qgis_server_info.error')
+          echo $qgis_info
+          if [[ "$qgis_info" != "null" ]]; then
+              echo "Failed to retrieve QGIS server metadata"
+              exit 1
+          else
+             echo "JSON metadata OK about QGIS Server"
+          fi
+
+      - name: Check about updated files after a build (PHP or JS)
+        run: |
+          if [[ -z $(git status --porcelain -uno) ]]; then
+              echo "No updated files 👍"
+          else
+              echo "Updated files"
+              git status
+              echo "::warning Git status is not clean"
+          #    exit 1
+          fi
+
+      - name: Load SQL data
+        run: |
+          cd qgis-projects/tests
+          ./load_sql.sh
+
+      - name: Add hosts to /etc/hosts
+        run: |
+            sudo echo "127.0.0.1 othersite.local" | sudo tee -a /etc/hosts
+
+      - name: "Setup Node.js (from .nvmrc)"
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: ${{ github.workspace }}/package.json
+
+      - name: Install dependencies
+        working-directory: ./
+        run: |
+          npm ci
+
+      - name: Run BATS tests
+        # BATS tests are shard-independent; run them once per config (first shard).
+        # continue-on-error: a BATS failure must not prevent the Playwright tests
+        # below from running.
+        id: bats-tests
+        if: matrix.shard == 1
+        continue-on-error: true
+        working-directory: ./
+        run: |
+          npm run bats
+      - name: Get Playwright version
+        id: playwright-version
+        run: |
+          VERSION=$(node -p "require('@playwright/test/package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright with browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: tests/end2end
+        run: |
+          npx playwright install --with-deps chromium
+
+      - name: Install Playwright dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: tests/end2end
+        run: |
+          npx playwright install-deps
+
+      - name: Run Playwright tests tagged "@requests" and "@readonly"
+        id: test-playwright-requests
+        working-directory: tests/end2end
+        env:
+          CRTF_JSON_FILE: playwright-tagged-requests.json
+          PLAYWRIGHT_JSON_OUTPUT_NAME: tests-results-requests.json
+        # Run serially (--workers=1): these are fast HTTP request tests that hit
+        # QGIS Server directly. In parallel, concurrent requests to the shared
+        # QGIS Server intermittently returned short/truncated responses (e.g. WFS
+        # GetFeature with a polygon filter), which flaked. Serial execution
+        # removes the contention and costs only a few extra seconds.
+        run: |
+          npx playwright test --grep "(?=.*@requests)(?=.*@readonly)" ${{ env.PLAYWRIGHT_OPTIONS }} --workers=1 --shard=${{ matrix.shard }}/3
+
+      - name: Run Playwright tests tagged "@readonly"
+        id: test-playwright-read-only
+        working-directory: tests/end2end
+        env:
+          CRTF_JSON_FILE: playwright-tagged-readonly.json
+          PLAYWRIGHT_JSON_OUTPUT_NAME: tests-results-readonly.json
+        if: |
+          steps.qgis-server-status.outcome == 'success' &&
+          ( success() ||
+          steps.test-playwright-requests.outcome != 'success' )
+        run: |
+          npx playwright test --grep @readonly --grep-invert @requests ${{ env.PLAYWRIGHT_OPTIONS }} --workers=2 --shard=${{ matrix.shard }}/3
+
+      - name: Prepare the database diff from Playwright "@readonly" tests
+        if: |
+          success() ||
+          steps.test-playwright-requests.outcome != 'success' ||
+          steps.test-playwright-read-only.outcome != 'success'
+        run: |
+          ./lizmap-ctl dump-pgsql-data
+          git diff --exit-code qgis-projects/tests/tests_dataset_data.sql
+          db_diff=$?
+          echo "db_diff=${db_diff}" >> "$GITHUB_OUTPUT"
+          if [[ -z ${db_diff} ]]; then
+                echo "No updated files 👍"
+          else
+                echo "Updated files"
+                git diff qgis-projects/tests/tests_dataset_data.sql > qgis-projects/tests/tests_dataset_data.patch
+                git restore qgis-projects/tests/tests_dataset_data.sql
+                echo "::warning Git status is not clean after running tests about the DB"
+                exit 0
+          fi
+
+      - name: Upload DB results
+        if: |
+          success() ||
+          steps.test-playwright-requests.outcome != 'success' ||
+          steps.test-playwright-read-only.outcome != 'success'
+        uses: actions/upload-artifact@master
+        with:
+          name: ${{ matrix.name }}-shard${{ matrix.shard }}-DB-diff-read-only
+          if-no-files-found: 'ignore'
+          path: |
+            ${{ github.workspace }}/tests/qgis-projects/tests/tests_dataset.patch
+
+      - name: Check about updated files after read only tests
+        if: |
+          success() ||
+          steps.test-playwright-requests.outcome != 'success' ||
+          steps.test-playwright-read-only.outcome != 'success'
+        run: |
+          if [[ -z $(git status --porcelain -uno) ]]; then
+              echo "No updated files 👍"
+          else
+              echo "Updated files"
+              git status
+              echo "::warning Git status is not clean after running tests about tracked files"
+          fi
+
+      - name: Run Playwright tests tagged neither "@readonly" nor "@write"
+        id: test-playwright-no-tag
+        working-directory: tests/end2end
+        env:
+          CRTF_JSON_FILE: playwright-no-tag.json
+          PLAYWRIGHT_JSON_OUTPUT_NAME: tests-results-no-tag.json
+        if: |
+          steps.qgis-server-status.outcome == 'success' &&
+          ( success() ||
+          steps.test-playwright-requests.outcome != 'success' ||
+          steps.test-playwright-read-only.outcome != 'success' )
+        run: |
+          npx playwright test --config playwright.serial.config.ts --workers 1 --grep-invert "(?=.*@write|.*@readonly)" ${{ env.PLAYWRIGHT_OPTIONS }} --shard=${{ matrix.shard }}/3
+
+      - name: Run Playwright tests tagged "@write"
+        id: test-playwright-write
+        working-directory: tests/end2end
+        env:
+          CRTF_JSON_FILE: playwright-tagged-write.json
+          PLAYWRIGHT_JSON_OUTPUT_NAME: tests-results-write.json
+        if: |
+          steps.qgis-server-status.outcome == 'success' &&
+          ( success() ||
+          steps.test-playwright-requests.outcome != 'success' ||
+          steps.test-playwright-read-only.outcome != 'success' ||
+          steps.test-playwright-no-tag.outcome != 'success' )
+        run: |
+          npx playwright test --config playwright.serial.config.ts --workers 1 --grep @write ${{ env.PLAYWRIGHT_OPTIONS }} --shard=${{ matrix.shard }}/3
+
+      - name: Debug
+        if: always()
+        working-directory: tests
+        run: |
+          find . -type d -name "test-results"
+          echo $GITHUB_WORKSPACE
+          echo ${{ github.workspace }}
+          echo ${{ github.workspace }}/tests/end2end/test-results/
+          # XXX: these directory may not exists !!!!!
+          ls -l $GITHUB_WORKSPACE/tests/end2end/test-results/  || true
+          ls ${{ github.workspace }}/tests/end2end/test-results/ || true
+
+      - name: Send screenshots if necessary about all Playwright tests, if one failed
+        if: |
+          failure() &&
+          ( steps.test-playwright-requests.outcome != 'success' ||
+          steps.test-playwright-read-only.outcome != 'success' ||
+          steps.test-playwright-no-tag.outcome != 'success' ||
+          steps.test-playwright-write.outcome != 'success' )
+        uses: actions/upload-artifact@master
+        with:
+          name: ${{ matrix.name }}-shard${{ matrix.shard }}-screenshots-readonly
+          if-no-files-found: 'ignore'
+          path: |
+            ${{ github.workspace }}/tests/end2end/test-results/
+
+      - name: Publish test report
+        continue-on-error: true
+        if: |
+          success() ||
+          steps.test-playwright-requests.outcome != 'success' ||
+          steps.test-playwright-read-only.outcome != 'success' ||
+          steps.test-playwright-no-tag.outcome != 'success' ||
+          steps.test-playwright-write.outcome != 'success'
+        uses: ctrf-io/github-test-reporter@v1.3.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_HUB_TOKEN || github.token  }}
+        with:
+          report-path: './tests/end2end/ctrf/*.json'
+          summary-report: true
+          flaky-report: true
+          flaky-rate-report: true
+          summary: true
+          title: All Playwright tests ${{ matrix.NAME }}
+          failed-report: true
+          # pull-request-report: true
+          # With sharding there are 9 jobs; keep the per-job summary but do not
+          # post one PR comment per shard (too noisy).
+          pull-request: false
+          # annotate: false
+          update-comment: true
+          overwrite-comment: false
+          comment-tag: '${{ github.workflow }}-${{ github.job }}-${{ matrix.name }}-shard${{ matrix.shard }}'
+
+      - name: Upload test results
+        if: |
+          success() ||
+          steps.test-playwright-requests.outcome != 'success' ||
+          steps.test-playwright-read-only.outcome != 'success' ||
+          steps.test-playwright-no-tag.outcome != 'success' ||
+          steps.test-playwright-write.outcome != 'success'
+        uses: actions/upload-artifact@master
+        with:
+          if-no-files-found: 'ignore'
+          name: ${{ matrix.name }}-shard${{ matrix.shard }}-playwright-report
+          path: ${{ github.workspace }}/tests/end2end/playwright-report
+
+      - name: Export some logs to files
+        if: always()
+        run: |
+          mkdir -p /tmp/e2e/lwc
+          mkdir -p /tmp/e2e/docker
+          docker logs lizmap${{ env.LZMBRANCH }}_test_qgis &> /tmp/e2e/docker/qgis-server.log | true
+          docker logs lizmap${{ env.LZMBRANCH }}_test_qgis_rpc &> /tmp/e2e/docker/qgis-server-rpc.log | true
+          docker logs lizmap${{ env.LZMBRANCH }}_test_php &> /tmp/e2e/docker/php.log | true
+          docker logs lizmap${{ env.LZMBRANCH }}_test_nginx &> /tmp/e2e/docker/nginx.log | true
+          cp -r ../lizmap/var/log /tmp/e2e/lwc/
+
+      - name: Upload all logs as artifact
+        uses: actions/upload-artifact@master
+        if: always()
+        with:
+          name: ${{ matrix.name }}-shard${{ matrix.shard }}-E2E-all-logs
+          path: |
+            /tmp/e2e/
+
+      - name: Database diff check after readonly tests
+        run:
+          exit ${{ env.db_diff }}
+
+      - name: Fail the job if BATS tests failed
+        if: steps.bats-tests.outcome == 'failure'
+        run: |
+          echo "::error BATS tests failed earlier in this job (see 'Run BATS tests' step)"
+          exit 1

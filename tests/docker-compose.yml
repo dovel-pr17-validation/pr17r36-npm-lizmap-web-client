@@ -1,0 +1,137 @@
+services:
+  pgsql:
+    image: 3liz/postgis:${LZMPOSTGISVERSION}
+    container_name: "lizmap${LZMBRANCH}_test_pgsql"
+    environment:
+      POSTGRES_DB: lizmap
+      POSTGRES_PASSWORD: lizmap1234!
+      POSTGRES_USER: lizmap
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - { type: bind, source: "..", target: /srv/lzm/ }
+    ports:
+      - ${LZMPGPORT}:5432
+    networks:
+      default:
+        aliases:
+          - db.lizmap.local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready || exit 1"]
+      interval: 30s
+      timeout: 30s
+      start_interval: 2s
+      start_period: 10s
+  redis:
+    image: redis:8-alpine
+    container_name: "lizmap${LZMBRANCH}_test_redis"
+  openldap:
+    build: ./docker-conf/openldap
+    container_name: "lizmap${LZMBRANCH}_test_ldap"
+    environment:
+      #SLAPD_FORCE_RECONFIGURE: false
+      SLAPD_PASSWORD: "passlizmap"
+      SLAPD_ORGANISATION: "Lizmap"
+      SLAPD_DOMAIN: "tests.lizmap"
+    volumes:
+      - { type: bind, source: ./docker-conf/openldap/ldif, target: /customldif }
+    profiles: ["dev"]
+  lizmap:
+    build:
+      context: ./docker-conf/phpfpm
+      args:
+        php_version: ${PHP_VERSION}
+        node_major: ${NODE_MAJOR}
+    container_name: "lizmap${LZMBRANCH}_test_php"
+    environment:
+      - APP_USER_ID=${LIZMAP_USER_ID}
+      - APP_GROUP_ID=${LIZMAP_GROUP_ID}
+      - DISPLAY_ERRORS=on
+      - PGSERVICEFILE=/srv/etc/pg_service.conf
+      - LIZMAP_ADMIN_LOGIN
+      - LIZMAP_ADMIN_EMAIL
+      - LIZMAP_ADMIN_DEFAULT_PASSWORD_SOURCE
+      - ECHO_OGC_ORIGINAL_REQUEST=on
+    volumes:
+      - { type: bind, source: "..", target: /srv/lzm/ }
+      - { type: bind, source: "tmp/", target: /tmp/ }
+      - { type: bind, source: ./docker-conf/pg_service.conf, target: /srv/etc/pg_service.conf }
+      - { type: bind, source: ./docker-conf/phpfpm/admin.conf, target: /srv/etc/admin.conf }
+    depends_on:
+      pgsql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      map:
+        condition: service_started
+  web:
+    image: nginx:alpine
+    container_name: "lizmap${LZMBRANCH}_test_nginx"
+    volumes:
+      - { type: bind, source: ./docker-conf/nginx-default.conf, target: /etc/nginx/conf.d/default.conf }
+      - { type: bind, source: ./docker-conf/certs, target: /etc/nginx/certs }
+      - { type: bind, source: "..", target: /srv/lzm/ }
+    command: /bin/sh -c "nginx -g 'daemon off;'"
+    networks:
+      default:
+        aliases:
+          - lizmap.local
+#          - othersite.local
+    ports:
+      - ${LZMWEBPORT}:80
+      - ${LZMWEBSPORT}:443
+    depends_on:
+      lizmap:
+        condition: service_healthy
+  # QGIS RPC backend
+  map-rpc:
+    container_name: "lizmap${LZMBRANCH}_test_qgis_rpc"
+    image: 3liz/qjazz:${LZMQGSRVVERSION}
+    command: ["qjazz-rpc", "serve", "-C", "/srv/etc/qgis-server.toml"]
+    user: ${LIZMAP_USER_ID}:${LIZMAP_GROUP_ID}
+    environment:
+      CONF_LOGGING__LEVEL: trace
+      CONF_WORKER__NUM_PROCESSES: 4
+      CONF_DISPLAY_XVFB: ON
+      QGIS_PLUGINPATH: /srv/qgis-server-plugins
+      QGIS_SERVER_LIZMAP_REVEAL_SETTINGS: yes
+      PGSERVICEFILE: /srv/etc/pg_service.conf
+    volumes:
+      - { type: bind, source: ./qgis-projects, target: /srv/projects }
+      - { type: bind, source: ./qgis-server-plugins, target: /srv/qgis-server-plugins }
+      - { type: bind, source: ./docker-conf/pg_service.conf, target: /srv/etc/pg_service.conf }
+      - { type: bind, source: ./docker-conf/qgis-server.toml, target: /srv/etc/qgis-server.toml }
+  # QGIS workers frontend
+  map:
+    container_name: "lizmap${LZMBRANCH}_test_qgis"
+    image: 3liz/qjazz:${LZMQGSRVVERSION}
+    command: ["qjazz-map", "serve", "-C", "/srv/etc/qgis-server.toml"]
+    environment:
+        CONF_LOGGING__LEVEL: trace
+    volumes:
+      - { type: bind, source: ./docker-conf/qgis-server.toml, target: /srv/etc/qgis-server.toml }
+    ports:
+      - ${LZMQGSRVPORT}:9080
+  webdav:
+    container_name: lizmap${LZMBRANCH}_test_webdav
+    image: ugeek/webdav:amd64
+    volumes:
+      - { type: bind, source: ./qgis-projects/webdav/test, target: /media }
+    environment:
+      - USERNAME=webdav
+      - PASSWORD=webdav
+      - UID=${LIZMAP_USER_ID}
+      - GID=${LIZMAP_GROUP_ID}
+      - TZ=Europe/Rome
+  swagger:
+    container_name: lizmap${LZMBRANCH}_swagger_ui
+    image: docker.swagger.io/swaggerapi/swagger-ui
+    environment:
+      SWAGGER_JSON: /api/openapi.yaml
+    volumes:
+      - { type: bind, source: ./api, target: /api }
+    ports:
+      - ${SWAGGER_PORT}:8080
+    profiles: ["dev"]
+volumes:
+  pg_data:
+    name: "lizmap${LZMBRANCH}_pg_data"

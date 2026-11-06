@@ -1,0 +1,165 @@
+<?php
+
+/**
+ * QGIS Project Visibility Preset.
+ *
+ * @author    3liz
+ * @copyright 2023 3liz
+ *
+ * @see      http://3liz.com
+ *
+ * @license Mozilla Public License : http://www.mozilla.org/MPL/
+ */
+
+namespace Lizmap\Project\Qgis;
+
+/**
+ * QGIS Project Visibility preset class.
+ *
+ * @property string                              $name
+ * @property array<ProjectVisibilityPresetLayer> $layers
+ * @property array<string>                       $checkedGroupNodes
+ * @property array<string>                       $expandedGroupNodes
+ * @property array<string, array<string>>        $checkedLegendNodes
+ */
+class ProjectVisibilityPreset extends BaseQgisObject
+{
+    /** @var array<string> The instance properties */
+    protected $properties = array(
+        'name',
+        'layers',
+        'checkedGroupNodes',
+        'expandedGroupNodes',
+        'checkedLegendNodes',
+    );
+
+    /** @var array<string> The not null properties */
+    protected $mandatoryProperties = array(
+        'name',
+        'layers',
+    );
+
+    protected function set(array $data): void
+    {
+        if (!array_key_exists('checkedGroupNodes', $data)) {
+            $data['checkedGroupNodes'] = array();
+        }
+        if (!array_key_exists('expandedGroupNodes', $data)) {
+            $data['expandedGroupNodes'] = array();
+        }
+        if (!array_key_exists('checkedLegendNodes', $data)) {
+            $data['checkedLegendNodes'] = array();
+        }
+        parent::set($data);
+    }
+
+    /**
+     * Get visibility preset as key array.
+     *
+     * @return array
+     */
+    public function toKeyArray()
+    {
+        $data = array(
+            'layers' => array(),
+            'checkedGroupNode' => $this->checkedGroupNodes,
+            'expandedGroupNode' => $this->expandedGroupNodes,
+            'checkedLegendNodes' => $this->checkedLegendNodes,
+        );
+        foreach ($this->layers as $layer) {
+            // Include ALL layers from theme (both visible="0" and visible="1")
+            // Layers present in theme should be checked in Lizmap, regardless of visible attribute
+            // The visible attribute is passed for potential future legend node handling
+            $data['layers'][$layer->id] = array(
+                'style' => $layer->style,
+                'expanded' => $layer->expanded,
+                'visible' => $layer->visible,
+            );
+        }
+
+        return $data;
+    }
+
+    /** @var string The XML element local name */
+    protected static $qgisLocalName = 'visibility-preset';
+
+    public static function fromXmlReader($oXmlReader)
+    {
+        if ($oXmlReader->nodeType != \XMLReader::ELEMENT) {
+            throw new \Exception('Provide an XMLReader::ELEMENT!');
+        }
+        $localName = static::$qgisLocalName;
+        if ($oXmlReader->localName != $localName) {
+            throw new \Exception('Provide a `'.$localName.'` element not `'.$oXmlReader->localName.'`!');
+        }
+
+        $depth = $oXmlReader->depth;
+        $data = array(
+            'name' => $oXmlReader->getAttribute('name'),
+            'layers' => array(),
+            'checkedGroupNodes' => array(),
+            'expandedGroupNodes' => array(),
+            'checkedLegendNodes' => array(),
+        );
+        while ($oXmlReader->read()) {
+            if ($oXmlReader->nodeType == \XMLReader::END_ELEMENT
+                && $oXmlReader->localName == $localName
+                && $oXmlReader->depth == $depth) {
+                break;
+            }
+
+            if ($oXmlReader->nodeType != \XMLReader::ELEMENT) {
+                continue;
+            }
+
+            if ($oXmlReader->depth > $depth + 2) {
+                continue;
+            }
+
+            $tagName = $oXmlReader->localName;
+            if ($tagName == 'layer') {
+                $data['layers'][] = new ProjectVisibilityPresetLayer(
+                    array(
+                        'id' => $oXmlReader->getAttribute('id'),
+                        'visible' => filter_var($oXmlReader->getAttribute('visible'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE),
+                        'style' => $oXmlReader->getAttribute('style'),
+                        'expanded' => filter_var($oXmlReader->getAttribute('expanded'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE),
+                    ),
+                );
+            } elseif ($tagName == 'checked-group-node') {
+                $data['checkedGroupNodes'][] = $oXmlReader->getAttribute('id');
+            } elseif ($tagName == 'expanded-group-node') {
+                $data['expandedGroupNodes'][] = $oXmlReader->getAttribute('id');
+            } elseif ($tagName == 'checked-legend-nodes') {
+                // if the element is empty, skip it
+                if ($oXmlReader->isEmptyElement) {
+                    continue;
+                }
+
+                // Read checked legend nodes for a specific layer
+                $layerId = $oXmlReader->getAttribute('id');
+                $legendNodeDepth = $oXmlReader->depth;
+                $legendNodes = array();
+
+                while ($oXmlReader->read()) {
+                    if ($oXmlReader->nodeType == \XMLReader::END_ELEMENT
+                        && $oXmlReader->localName == 'checked-legend-nodes'
+                        && $oXmlReader->depth == $legendNodeDepth) {
+                        break;
+                    }
+
+                    if ($oXmlReader->nodeType == \XMLReader::ELEMENT
+                        && $oXmlReader->localName == 'checked-legend-node') {
+                        $legendNodes[] = $oXmlReader->getAttribute('id');
+                    }
+                }
+
+                if (!empty($legendNodes)) {
+                    $data['checkedLegendNodes'][$layerId] = $legendNodes;
+                }
+            }
+        }
+
+        return new ProjectVisibilityPreset($data);
+    }
+}

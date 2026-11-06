@@ -1,0 +1,1509 @@
+// @ts-check
+import { test, expect } from '@playwright/test';
+import { expect as responseExpect } from './fixtures/expect-response.js'
+import { expect as requestExpect } from './fixtures/expect-request.js'
+import { ProjectPage } from "./pages/project";
+import { playwrightTestFile } from './globals';
+
+test.describe('Edition Form Validation', () => {
+
+    test.beforeEach(async ({ page }) => {
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+        await project.open();
+    });
+
+    test('Input type number with range and step', async ({ page }) => {
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+        const formRequest = await project.openEditingFormWithLayer('form_edition_all_fields_types');
+        await formRequest.response();
+
+        // ensure input attributes match with field config defined in project
+        await expect(page.locator('#jforms_view_edition input[name="integer_field"]')).toHaveAttribute('type', 'number')
+        await expect(page.locator('#jforms_view_edition input[name="integer_field"]')).toHaveAttribute('step', '5');
+        await expect(page.locator('#jforms_view_edition input[name="integer_field"]')).toHaveAttribute('min', '-200');
+        await expect(page.locator('#jforms_view_edition input[name="integer_field"]')).toHaveAttribute('max', '200');
+
+        // add data
+        await page.locator('#jforms_view_edition input[name="integer_field"]').fill('50');
+
+        // submit form
+        let saveFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/saveFeature/);
+        await project.editingSubmitForm();
+        let saveFeatureRequest = await saveFeatureRequestPromise;
+        await saveFeatureRequest.response();
+    })
+
+    test('Boolean nullable w/ value map', async ({ page }) => {
+
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+        const formRequest = await project.openEditingFormWithLayer('many_bool_formats');
+        await formRequest.response();
+
+        await page.getByLabel('bool_simple_null_vm').selectOption('t');
+
+        // submit the form and wait for reopening form
+        let saveFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/saveFeature/);
+        await project.editingSubmitForm('edit');
+        let saveFeatureRequest = await saveFeatureRequestPromise;
+        let editFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/editFeature/);
+        await saveFeatureRequest.response();
+        let editFeatureRequest = await editFeatureRequestPromise;
+        await editFeatureRequest.response();
+
+        await expect(page.getByLabel('bool_simple_null_vm')).toHaveValue('t');
+        await page.getByLabel('bool_simple_null_vm').selectOption('');
+
+        // submit the form and wait for reopening form
+        saveFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/saveFeature/);
+        await project.editingSubmitForm('edit');
+        saveFeatureRequest = await saveFeatureRequestPromise;
+        editFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/editFeature/);
+        await saveFeatureRequest.response();
+        editFeatureRequest = await editFeatureRequestPromise;
+        await editFeatureRequest.response();
+
+        await expect(page.getByLabel('bool_simple_null_vm')).toHaveValue('');
+    })
+
+    test('Error fetch form', async ({ page }) => {
+        await page.route('**/edition/createFeature*', async route => {
+            await route.fulfill({
+                status: 404,
+                contentType: 'text/plain',
+                body: 'Not Found!'
+            });
+        });
+
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+
+        // not used await project.openEditingFormWithLayer('form_edition_all_fields_types');
+        // because createFeature will fail
+        await project.buttonEditing.click();
+        await page.locator('#edition-layer').hover();
+        await page.locator('a#edition-draw').click();
+
+        // message
+        await expect(page.locator("#lizmap-edition-message")).toBeVisible();
+        await expect(page.locator("#message > div")).toHaveClass(/alert-danger/);
+
+        // Remove listen to create feature
+        await page.unroute('**/edition/createFeature*');
+    })
+
+    test('Error send feature', async ({ page }) => {
+        // display form
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+        const formRequest = await project.openEditingFormWithLayer('form_edition_all_fields_types');
+        await formRequest.response();
+
+        // add data
+        await page.locator('#jforms_view_edition input[name="integer_field"]').fill('50');
+
+        await page.route('**/edition/saveFeature*', async route => {
+            await route.fulfill({
+                status: 404,
+                contentType: 'text/plain',
+                body: 'Not Found!'
+            });
+        });
+
+        // submit the form
+        let saveFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/saveFeature/);
+        await project.editingSubmit('submit').click(); // do not use editingSubmitForm because of expecting in
+        let saveFeatureRequest = await saveFeatureRequestPromise;
+        await saveFeatureRequest.response();
+
+        // message
+        await expect(page.locator("#lizmap-edition-message")).toBeVisible();
+        await expect(page.locator("#message > div")).toHaveClass(/alert-danger/);
+
+        // form still here
+        await expect(page.locator('#edition-form-container')).toBeVisible();
+
+        // Close form
+        page.once('dialog', dialog => dialog.accept());
+        await project.editingSubmit('cancel').click();
+
+        // form closed
+        await expect(page.locator('#edition-form-container')).toBeHidden();
+
+        // Remove listen to save feature
+        await page.unroute('**/edition/saveFeature*');
+    })
+})
+
+
+test.describe('Multiple geometry layers', () => {
+
+    test.beforeEach(async ({ page }) => {
+        const project = new ProjectPage(page, 'multiple_geom');
+        await project.open();
+    });
+
+    test('Double geom layer', async ({ page }) => {
+        const project = new ProjectPage(page, 'multiple_geom');
+
+        // double_geom layer editing, layer with "geom" column
+        let formRequest = await project.openEditingFormWithLayer('double_geom');
+        await formRequest.response();
+
+        expect(page.locator('#edition')).toBeVisible();
+        expect(page.locator('#edition .edition-tabs')).toBeVisible();
+        expect(page.locator('#edition-form-container')).toBeVisible();
+
+        // inspect form
+        await expect(page.locator('#jforms_view_edition input[name="liz_geometryColumn"]')).toHaveValue('geom');
+        await expect(page.getByRole('heading', { name: 'double_geom' })).toHaveText('double_geom');
+
+        // insert a polygon feature
+        await page.locator('#map').click({
+            position: {
+                x: 608,
+                y: 260
+            }
+        });
+        await page.waitForTimeout(300);
+
+        await page.locator('#map').click({
+            position: {
+                x: 629,
+                y: 200
+            }
+        });
+        await page.waitForTimeout(300);
+
+        await page.locator('#map').dblclick({
+            position: {
+                x: 560,
+                y: 191
+            }
+        });
+        await page.waitForTimeout(300);
+
+        // fill the form
+        await page.locator('#jforms_view_edition input[name="title"]').fill('geom');
+
+        // submit the form
+        let saveFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/saveFeature/);
+        await project.editingSubmitForm();
+        let saveFeatureRequest = await saveFeatureRequestPromise;
+        await saveFeatureRequest.response();
+
+        await expect(page.locator('#edition-form-container')).toBeHidden();
+        await expect(page.locator('#lizmap-edition-message')).toBeVisible();
+
+        // double_geom_layer editing, layer with "geom_d" column
+        formRequest = await project.openEditingFormWithLayer('double_geom_d');
+        await formRequest.response();
+
+        expect(page.locator('#edition')).toBeVisible();
+        expect(page.locator('#edition .edition-tabs')).toBeVisible();
+        expect(page.locator('#edition-form-container')).toBeVisible();
+
+        // inspect form
+        await expect(page.locator('#jforms_view_edition input[name="liz_geometryColumn"]')).toHaveValue('geom_d');
+        await expect(page.getByRole('heading', { name: 'double_geom_d' })).toHaveText('double_geom_d');
+
+        // insert a polygon feature
+        await page.locator('#map').click({
+            position: {
+                x: 651,
+                y: 401
+            }
+        });
+        await page.waitForTimeout(300);
+
+        await page.locator('#map').click({
+            position: {
+                x: 695,
+                y: 368
+            }
+        });
+        await page.waitForTimeout(300);
+
+        await page.locator('#map').dblclick({
+            position: {
+                x: 641,
+                y: 373
+            }
+        });
+        await page.waitForTimeout(300);
+
+        // fill the form
+        await page.locator('#jforms_view_edition input[name="title"]').fill('geom_d');
+
+        // submit the form
+        saveFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/saveFeature/);
+        await project.editingSubmitForm();
+        saveFeatureRequest = await saveFeatureRequestPromise;
+        await saveFeatureRequest.response();
+
+        await expect(page.locator('#edition-form-container')).toBeHidden();
+        await expect(page.locator('#lizmap-edition-message')).toBeVisible();
+
+        // inspect attribute table
+        // open attribute table panel
+        await page.locator('#button-attributeLayers').click();
+
+        // maximize panel
+        await page.getByRole('button', { name: 'Maximize' }).click();
+
+        const num_rec = 3;
+
+        let datatablesRequestPromise = page.waitForRequest(request => request.method() === 'POST' && request.postData()?.includes('draw') === true);
+
+        // DOUBLE_GEOM_GEOM
+        // open main layer attribute table panel
+        await page.locator('#attribute-layer-list button[value="double_geom_geom"]').click();
+        await datatablesRequestPromise;
+
+        let double_geom_geom_attr_table_head = page.locator("#attribute-layer-table-double_geom_geom_wrapper .dt-scroll-head table");
+        let double_geom_geom_attr_table = page.locator("#attribute-layer-table-double_geom_geom");
+
+        await expect(double_geom_geom_attr_table_head.locator("thead th").nth(1)).toHaveText("id");
+        await expect(double_geom_geom_attr_table_head.locator("thead th").nth(2)).toHaveText("title");
+        // since "geom" is the geometry column, the geom_d column should be listed in the attribute table
+        await expect(double_geom_geom_attr_table_head.locator("thead th").nth(3)).toHaveText("geom_d");
+
+        // expect the three layers to have the same number of records
+        await expect(double_geom_geom_attr_table.locator("tbody tr")).toHaveCount(num_rec);
+        // first record comes from db initialization and contains all geometry, so it is equal for all the layers
+        await expect(double_geom_geom_attr_table.locator("tbody tr").nth(0).locator("td").nth(2)).toHaveText("F2");
+        await expect(double_geom_geom_attr_table.locator("tbody tr").nth(0).locator("td").nth(3)).toHaveText("[object Object]");
+        // geom record does not have geom_d attribute filled because its geometry is stored in the geom column, not shown in the attribute table
+        await expect(double_geom_geom_attr_table.locator("tbody tr").nth(1).locator("td").nth(2)).toHaveText("geom");
+        await expect(double_geom_geom_attr_table.locator("tbody tr").nth(1).locator("td").nth(3)).toHaveText("");
+        // in the double_geom_geom table, the geom_d record geometry should be correctly stored in the geom_d column
+        await expect(double_geom_geom_attr_table.locator("tbody tr").nth(2).locator("td").nth(2)).toHaveText("geom_d");
+        await expect(double_geom_geom_attr_table.locator("tbody tr").nth(2).locator("td").nth(3)).toHaveText("[object Object]");
+
+        // DOUBLE_GEOM_GEOM_D
+        // open main layer attribute table panel
+        await page.locator('#nav-tab-attribute-summary').click();
+        await page.locator('#attribute-layer-list button[value="double_geom_geom_d"]').click();
+        await datatablesRequestPromise;
+
+        let double_geom_geom_d_attr_table_head = page.locator("#attribute-layer-table-double_geom_geom_d_wrapper .dt-scroll-head table");
+        let double_geom_geom_d_attr_table = page.locator("#attribute-layer-table-double_geom_geom_d");
+
+        await expect(double_geom_geom_d_attr_table_head.locator("thead th").nth(1)).toHaveText("id");
+        await expect(double_geom_geom_d_attr_table_head.locator("thead th").nth(2)).toHaveText("title");
+        // since "geom_d" is the geometry column, the geom column should be listed in the attribute table
+        await expect(double_geom_geom_d_attr_table_head.locator("thead th").nth(3)).toHaveText("geom");
+
+        // expect the three layers to have the same number of records
+        await expect(double_geom_geom_d_attr_table.locator("tbody tr")).toHaveCount(num_rec);
+        // first record comes from db initialization and contains all geometry, so it is equal for all the layers
+        await expect(double_geom_geom_d_attr_table.locator("tbody tr").nth(0).locator("td").nth(2)).toHaveText("F2");
+        await expect(double_geom_geom_d_attr_table.locator("tbody tr").nth(0).locator("td").nth(3)).toHaveText("[object Object]");
+        // in the double_geom_geom_d table, the geom record geometry should be correctly stored in the geom column
+        await expect(double_geom_geom_d_attr_table.locator("tbody tr").nth(1).locator("td").nth(2)).toHaveText("geom");
+        await expect(double_geom_geom_d_attr_table.locator("tbody tr").nth(1).locator("td").nth(3)).toHaveText("[object Object]");
+        // geom_d record does not have geom attribute filled because its geometry is stored in the geom_d column, not shown in the attribute table
+        await expect(double_geom_geom_d_attr_table.locator("tbody tr").nth(2).locator("td").nth(2)).toHaveText("geom_d");
+        await expect(double_geom_geom_d_attr_table.locator("tbody tr").nth(2).locator("td").nth(3)).toHaveText("");
+
+    })
+
+    test('Triple geom layer', async ({ page }) => {
+        const project = new ProjectPage(page, 'multiple_geom');
+
+        await page.locator('#button-edition').click();
+
+        // triple_geom_layer editing, layer with "geom" column
+        let formRequest = await project.openEditingFormWithLayer('triple_geom_point');
+        await formRequest.response();
+
+        expect(page.locator('#edition')).toBeVisible();
+        expect(page.locator('#edition .edition-tabs')).toBeVisible();
+        expect(page.locator('#edition-form-container')).toBeVisible();
+
+        // inspect form
+        await expect(page.locator('#jforms_view_edition input[name="liz_geometryColumn"]')).toHaveValue('geom');
+        await expect(page.getByRole('heading', { name: 'triple_geom_point' })).toHaveText('triple_geom_point');
+
+        // insert a point feature
+        await page.locator('#map').click({
+            position: {
+                x: 523,
+                y: 389
+            }
+        });
+        await page.waitForTimeout(300);
+
+        // fill the form
+        await page.locator('#jforms_view_edition input[name="title"]').fill('triple_geom_point');
+
+        // submit the form
+        let saveFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/saveFeature/);
+        await project.editingSubmitForm();
+        let saveFeatureRequest = await saveFeatureRequestPromise;
+        await saveFeatureRequest.response();
+
+        await expect(page.locator('#edition-form-container')).toBeHidden();
+        await expect(page.locator('#lizmap-edition-message')).toBeVisible();
+
+        // triple_geom_layer editing, layer with "geom_l" column
+        formRequest = await project.openEditingFormWithLayer('triple_geom_line');
+        await formRequest.response();
+
+        expect(page.locator('#edition')).toBeVisible();
+        expect(page.locator('#edition .edition-tabs')).toBeVisible();
+        expect(page.locator('#edition-form-container')).toBeVisible();
+
+        // inspect form
+        await expect(page.locator('#jforms_view_edition input[name="liz_geometryColumn"]')).toHaveValue('geom_l');
+        await expect(page.getByRole('heading', { name: 'triple_geom_line' })).toHaveText('triple_geom_line');
+
+        // insert a line feature
+        await page.locator('#map').click({
+            position: {
+                x: 545,
+                y: 438
+            }
+        });
+        await page.waitForTimeout(300);
+
+        await page.locator('#map').dblclick({
+            position: {
+                x: 589,
+                y: 413
+            }
+        });
+        await page.waitForTimeout(300)
+
+        // fill the form
+        await page.locator('#jforms_view_edition input[name="title"]').fill('triple_geom_line');
+
+        // submit the form
+        saveFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/saveFeature/);
+        await project.editingSubmitForm();
+        saveFeatureRequest = await saveFeatureRequestPromise;
+        await saveFeatureRequest.response();
+
+        await expect(page.locator('#edition-form-container')).toBeHidden();
+        await expect(page.locator('#lizmap-edition-message')).toBeVisible()
+
+        // triple_geom_layer editing, layer with "geom_p" column
+        formRequest = await project.openEditingFormWithLayer('triple_geom_polygon');
+        await formRequest.response();
+
+        expect(page.locator('#edition')).toBeVisible();
+        expect(page.locator('#edition .edition-tabs')).toBeVisible();
+        expect(page.locator('#edition-form-container')).toBeVisible();
+
+        // inspect form
+        await expect(page.locator('#jforms_view_edition input[name="liz_geometryColumn"]')).toHaveValue('geom_p');
+        await expect(page.getByRole('heading', { name: 'triple_geom_polygon' })).toHaveText('triple_geom_polygon');
+
+        // insert a polygon feature
+        await page.locator('#map').click({
+            position: {
+                x: 633,
+                y: 319
+            }
+        });
+        await page.waitForTimeout(300);
+
+        await page.locator('#map').click({
+            position: {
+                x: 645,
+                y: 280
+            }
+        });
+        await page.waitForTimeout(300);
+
+        await page.locator('#map').dblclick({
+            position: {
+                x: 677,
+                y: 315
+            }
+        });
+        await page.waitForTimeout(300);
+
+        // fill the form
+        await page.locator('#jforms_view_edition input[name="title"]').fill('triple_geom_polygon');
+
+        // submit the form
+        saveFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/saveFeature/);
+        await project.editingSubmitForm();
+        saveFeatureRequest = await saveFeatureRequestPromise;
+        await saveFeatureRequest.response();
+
+        await expect(page.locator('#edition-form-container')).toBeHidden();
+        await expect(page.locator('#lizmap-edition-message')).toBeVisible();
+
+        // inspect attribute table
+        // open attribute table panel
+        await page.locator('#button-attributeLayers').click();
+
+        // maximize panel
+        await page.getByRole('button', { name: 'Maximize' }).click();
+
+        const num_rec = 4;
+
+        let datatablesRequestPromise = page.waitForRequest(request => request.method() === 'POST' && request.postData()?.includes('draw') === true);
+
+        // TRIPLE_GEOM_POINT
+        // open main layer attribute table panel
+        await page.locator('#attribute-layer-list button[value="triple_geom_geom"]').click();
+        await datatablesRequestPromise;
+
+        let triple_geom_geom_attr_table_head = page.locator("#attribute-layer-table-triple_geom_geom_wrapper .dt-scroll-head table");
+        let triple_geom_geom_attr_table = page.locator("#attribute-layer-table-triple_geom_geom");
+
+        await expect(triple_geom_geom_attr_table_head.locator("thead th").nth(1)).toHaveText("id");
+        await expect(triple_geom_geom_attr_table_head.locator("thead th").nth(2)).toHaveText("title");
+        // since "geom" is the geometry column, the geom_l and the geom _p columns should be listed in the attribute table
+        await expect(triple_geom_geom_attr_table_head.locator("thead th").nth(3)).toHaveText("geom_l");
+        await expect(triple_geom_geom_attr_table_head.locator("thead th").nth(4)).toHaveText("geom_p");
+
+        // expect the three layers to have the same number of records
+        await expect(triple_geom_geom_attr_table.locator("tbody tr")).toHaveCount(num_rec);
+        // first record comes from db initialization and contains all geometry, so it is equal for all the layers
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(0).locator("td").nth(2)).toHaveText("P2");
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(0).locator("td").nth(3)).toHaveText("[object Object]");
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(0).locator("td").nth(4)).toHaveText("[object Object]");
+        // triple_geom_point record does not have geom_l or geom_p attribute filled because its geometry is stored in the geom column, not shown in the attribute table
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(1).locator("td").nth(2)).toHaveText("triple_geom_point");
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(1).locator("td").nth(3)).toHaveText("");
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(1).locator("td").nth(4)).toHaveText("");
+        // in the triple_geom_point table, the triple_geom_line record geometry should be correctly stored in the geom_l column
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(2).locator("td").nth(2)).toHaveText("triple_geom_line");
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(2).locator("td").nth(3)).toHaveText("[object Object]");
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(2).locator("td").nth(4)).toHaveText("");
+        // in the triple_geom_point table, the triple_geom_polygon record geometry should be correctly stored in the geom_p column
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(3).locator("td").nth(2)).toHaveText("triple_geom_polygon");
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(3).locator("td").nth(3)).toHaveText("");
+        await expect(triple_geom_geom_attr_table.locator("tbody tr").nth(3).locator("td").nth(4)).toHaveText("[object Object]");
+
+
+        // TRIPLE_GEOM_LINE
+        // open main layer attribute table panel
+        await page.locator('#nav-tab-attribute-summary').click();
+        await page.locator('#attribute-layer-list button[value="triple_geom_geom_l"]').click();
+
+        await datatablesRequestPromise;
+
+        let triple_geom_geom_l_attr_table_head = page.locator("#attribute-layer-table-triple_geom_geom_l_wrapper .dt-scroll-head table");
+        let triple_geom_geom_l_attr_table = page.locator("#attribute-layer-table-triple_geom_geom_l");
+
+        await expect(triple_geom_geom_l_attr_table_head.locator("thead th").nth(1)).toHaveText("id");
+        await expect(triple_geom_geom_l_attr_table_head.locator("thead th").nth(2)).toHaveText("title");
+        // since "geom_l" is the geometry column, the geom and the geom_p columns should be listed in the attribute table
+        await expect(triple_geom_geom_l_attr_table_head.locator("thead th").nth(3)).toHaveText("geom");
+        await expect(triple_geom_geom_l_attr_table_head.locator("thead th").nth(4)).toHaveText("geom_p");
+
+        // expect the three layers to have the same number of records
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr")).toHaveCount(num_rec);
+        // first record comes from db initialization and contains all geometry, so it is equal for all the layers
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(0).locator("td").nth(2)).toHaveText("P2");
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(0).locator("td").nth(3)).toHaveText("[object Object]");
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(0).locator("td").nth(4)).toHaveText("[object Object]");
+        // in the triple_geom_line table, the triple_geom_point record geometry should be correctly stored in the geom column
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(1).locator("td").nth(2)).toHaveText("triple_geom_point");
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(1).locator("td").nth(3)).toHaveText("[object Object]");
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(1).locator("td").nth(4)).toHaveText("");
+        // triple_geom_line record does not have geom or geom_p attribute filled because its geometry is stored in the geom_l column, not shown in the attribute table
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(2).locator("td").nth(2)).toHaveText("triple_geom_line");
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(2).locator("td").nth(3)).toHaveText("");
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(2).locator("td").nth(4)).toHaveText("");
+        // in the triple_geom_line table, the triple_geom_polygon record geometry should be correctly stored in the geom_p column
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(3).locator("td").nth(2)).toHaveText("triple_geom_polygon");
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(3).locator("td").nth(3)).toHaveText("");
+        await expect(triple_geom_geom_l_attr_table.locator("tbody tr").nth(3).locator("td").nth(4)).toHaveText("[object Object]");
+
+        // TRIPLE_GEOM_POLYGON
+        // open main layer attribute table panel
+        await page.locator('#nav-tab-attribute-summary').click();
+        await page.locator('#attribute-layer-list button[value="triple_geom_geom_p"]').click();
+
+        await datatablesRequestPromise;
+
+        let triple_geom_geom_p_attr_table_head = page.locator("#attribute-layer-table-triple_geom_geom_p_wrapper .dt-scroll-head table");
+        let triple_geom_geom_p_attr_table = page.locator("#attribute-layer-table-triple_geom_geom_p");
+
+        await expect(triple_geom_geom_p_attr_table_head.locator("thead th").nth(1)).toHaveText("id");
+        await expect(triple_geom_geom_p_attr_table_head.locator("thead th").nth(2)).toHaveText("title");
+        // since "geom_p" is the geometry column, the geom and the geom_l columns should be listed in the attribute table
+        await expect(triple_geom_geom_p_attr_table_head.locator("thead th").nth(3)).toHaveText("geom");
+        await expect(triple_geom_geom_p_attr_table_head.locator("thead th").nth(4)).toHaveText("geom_l");
+
+        // expect the three layers to have the same number of records
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr")).toHaveCount(num_rec);
+        // first record comes from db initialization and contains all geometry, so it is equal for all the layers
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(0).locator("td").nth(2)).toHaveText("P2");
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(0).locator("td").nth(3)).toHaveText("[object Object]");
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(0).locator("td").nth(4)).toHaveText("[object Object]");
+        // in the triple_geom_polygon table, the triple_geom_point record geometry should be correctly stored in the geom column
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(1).locator("td").nth(2)).toHaveText("triple_geom_point");
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(1).locator("td").nth(3)).toHaveText("[object Object]");
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(1).locator("td").nth(4)).toHaveText("");
+        // in the triple_geom_polygon table, the triple_geom_line record geometry should be correctly stored in the geom_l column
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(2).locator("td").nth(2)).toHaveText("triple_geom_line");
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(2).locator("td").nth(3)).toHaveText("");
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(2).locator("td").nth(4)).toHaveText("[object Object]");
+        // triple_geom_polygon record does not have geom or geom_l attribute filled because its geometry is stored in the geom_p column, not shown in the attribute table
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(3).locator("td").nth(2)).toHaveText("triple_geom_polygon");
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(3).locator("td").nth(3)).toHaveText("");
+        await expect(triple_geom_geom_p_attr_table.locator("tbody tr").nth(3).locator("td").nth(4)).toHaveText("");
+
+    })
+})
+
+test.describe(
+    'Text widget in a form',
+    {
+        tag: ['@write'],
+    }, () =>
+    {
+
+        const LAYER_ID = 'text_widget_point_edit_87ab8b55_b3f5_4bf5_ad25_5c540dcd5a97';
+        const TEXT_WIDGETS = ['Constant', 'Geometry X', 'id check', 'Wrong expression', 'Name check'];
+
+        /**
+         * Text widget values of an evaluateDefaultExpressions response, without the template indentation
+         * @param {import('@playwright/test').Response|null} response The evaluateDefaultExpressions response
+         * @returns {Promise<{[key: string]: string}>} The text widget values
+         */
+        const textWidgetValues = async (response) => Object.fromEntries(
+            Object.entries(await response?.json() ?? {})
+                .map(([name, value]) => [name, String(value).replace(/\s+/g, ' ').trim()])
+        );
+
+        test('Edit form with text widget in it', async ({ page }) => {
+
+            const project = new ProjectPage(page, 'text_widget');
+            await project.open();
+
+            let getFeatureInfoRequestPromise = project.waitForGetFeatureInfoRequest();
+
+            await project.clickOnMap(354, 370);
+            let getFeatureInfoRequest = await getFeatureInfoRequestPromise;
+
+            const expectedParameters = {
+                'SERVICE': 'WMS',
+                'REQUEST': 'GetFeatureInfo',
+                'VERSION': '1.3.0',
+                'INFO_FORMAT': /^text\/html/,
+                'LAYERS': 'text_widget_point_edit',
+                'QUERY_LAYERS': 'text_widget_point_edit',
+                'STYLE': 'default',
+                'WIDTH': '870',
+                'HEIGHT': '575',
+                'I': '354',
+                'J': '370',
+                'FEATURE_COUNT': '10',
+                'CRS': 'EPSG:4326',
+                'BBOX': /43.5515\d+,3.7760\d+,43.6884\d+,3.9831\d+/,
+            }
+            requestExpect(getFeatureInfoRequest).toContainParametersInPostData(expectedParameters);
+
+            // wait for response
+            let getFeatureInfoResponse = await getFeatureInfoRequest.response();
+            responseExpect(getFeatureInfoResponse).toBeHtml();
+
+            // time for rendering the popup
+            await page.waitForTimeout(100);
+
+            const popup = await project.identifyContentLocator(
+                '1',
+                'text_widget_point_edit_87ab8b55_b3f5_4bf5_ad25_5c540dcd5a97'
+            );
+            await expect(popup.locator('.lizmapPopupTitle')).toHaveText('Point edit');
+            await expect(popup.locator('.lizmapPopupDiv ul.nav-tabs li')).toHaveCount(3);
+
+            const popupTabs = popup.locator('.lizmapPopupDiv div.tab-pane');
+            await expect(popupTabs).toHaveCount(3);
+
+            // first popup tab
+            const firstTabFields = popupTabs.nth(0).locator('.field');
+            const firstTabControls = popupTabs.nth(0).locator('.jforms-control-input');
+            await expect(firstTabFields).toHaveCount(3);
+            await expect(firstTabControls).toHaveCount(2);
+
+            await expect(firstTabFields.nth(0)).toHaveText('text string');
+            await expect(firstTabFields.nth(1)).toHaveText('3.8602126068661824');
+            await expect(firstTabFields.nth(2)).toHaveText('1');
+
+            await expect(firstTabControls.nth(0)).toHaveText('1');
+            await expect(firstTabControls.nth(1)).toHaveText('Widget_test');
+
+            // second popup tab
+            const secondTabFields = popupTabs.nth(1).locator('.field');
+            await expect(secondTabFields).toHaveCount(1);
+
+            await expect(secondTabFields.nth(0)).toHaveText('[%kk[% "ids" %]%]');
+
+            // third popup tab
+            const thirdTabFields = popupTabs.nth(2).locator('.field');
+            await expect(thirdTabFields).toHaveCount(1);
+
+            await expect(thirdTabFields.nth(0)).toHaveText('Widget_test');
+
+            // edit the feature
+            await popup.locator('.feature-toolbar .feature-edit').click();
+
+            // the text widgets in the form should be filled as in the popup
+            //project.editionForm = page.locator('#jforms_view_edition');
+            await expect(project.editionForm.locator('div.tab-pane')).toHaveCount(3);
+
+            // first tab
+            await expect(project.editionForm.locator('div.tab-pane').nth(0).locator('div.form-group')).toHaveCount(5);
+            await project.checkEditionFormTextField('id', '1', 'id');
+            await project.checkEditionFormTextField('Constant', 'text string', 'Constant', true);
+            await project.checkEditionFormTextField('Geometry X', '3.8602126068661824', 'Geometry X', true);
+            await project.checkEditionFormTextField('id check', '1', 'id check', true);
+            await project.checkEditionFormTextField('point_name', 'Widget_test', 'Name');
+
+            // second tab
+            await expect(project.editionForm.locator('div.tab-pane').nth(2).locator('div.form-group')).toHaveCount(1);
+            let wrongExpressionValue = await project.getEditionFormTextFieldValue('Wrong expression', 'Wrong expression', true);
+            expect(['[%kk[% "ids" %]%]', '']).toEqual(expect.arrayContaining([wrongExpressionValue]));
+
+            // third tab
+            await expect(project.editionForm.locator('div.tab-pane').nth(1).locator('div.form-group')).toHaveCount(1);
+            await project.checkEditionFormTextField('Name check', 'Widget_test', 'Name check', true);
+
+            // change the name: the text widgets are refreshed
+            let evaluateRequestPromise = project.waitForEvaluateDefaultExpressionsRequest('text modified');
+            await project.fillEditionFormTextInput('point_name', 'text modified');
+            await project.editionForm.locator('#jforms_view_edition_point_name').blur();
+            let evaluateRequest = await evaluateRequestPromise;
+            requestExpect(evaluateRequest).toContainParametersInPostData({
+                'repository': 'testsrepository',
+                'project': 'text_widget',
+                'layerId': LAYER_ID,
+                'geometry': /^POINT ?\(3\.86021260686618\d* 43\.\d+\)$/,
+                'fields': '[]',
+            });
+            let evaluateParams = new URLSearchParams(evaluateRequest.postData() ?? '');
+            expect(JSON.parse(evaluateParams.get('texts') ?? '')).toEqual(TEXT_WIDGETS);
+            expect(JSON.parse(evaluateParams.get('values') ?? '')).toMatchObject({
+                'id': '1',
+                'point_name': 'text modified',
+            });
+
+            let evaluateResponse = await evaluateRequest.response();
+            responseExpect(evaluateResponse).toBeJson();
+            expect(await textWidgetValues(evaluateResponse)).toMatchObject({
+                'Constant': 'text string',
+                'Geometry X': '3.8602126068661824',
+                'id check': '1',
+                'Name check': 'text modified',
+            });
+
+            // the text widgets are updated before saving
+            await project.checkEditionFormTextField('Name check', 'text modified', 'Name check', true);
+            await project.checkEditionFormTextField('Geometry X', '3.8602126068661824', 'Geometry X', true);
+            await project.checkEditionFormTextField('id check', '1', 'id check', true);
+
+            // save the form
+            let editFeatureRequestPromiseUpdate = page.waitForResponse(response => response.url().includes('editFeature'));
+            await project.editingSubmitForm('edit');
+            await editFeatureRequestPromiseUpdate;
+            await page.waitForTimeout(300);
+
+            // set new edition form instance
+            //project.editionForm = page.locator('#jforms_view_edition');
+
+            await project.checkEditionFormTextField('id', '1', 'id');
+            await project.checkEditionFormTextField('Constant', 'text string', 'Constant', true);
+            await project.checkEditionFormTextField('Geometry X', '3.8602126068661824', 'Geometry X', true);
+            await project.checkEditionFormTextField('id check', '1', 'id check', true);
+            await project.checkEditionFormTextField('point_name', 'text modified', 'Name');
+            wrongExpressionValue = await project.getEditionFormTextFieldValue('Wrong expression', 'Wrong expression', true);
+            expect(['[%kk[% "ids" %]%]', '']).toEqual(expect.arrayContaining([wrongExpressionValue]));
+
+            await project.checkEditionFormTextField('Name check', 'text modified', 'Name check', true);
+        })
+
+        test('Insert new feature', async ({ page }) => {
+
+            const project = new ProjectPage(page, 'text_widget');
+            await project.open();
+
+            const formRequest = await project.openEditingFormWithLayer('Point edit');
+            await formRequest.response();
+
+            expect(page.locator('#edition')).toBeVisible();
+            expect(page.locator('#edition .edition-tabs')).toBeVisible();
+            expect(page.locator('#edition-form-container')).toBeVisible();
+
+            // set edition form instance
+            project.editionForm = page.locator('#jforms_view_edition');
+            // the text widgets in the form should be filled as in the popup
+            await expect(project.editionForm.locator('div.tab-pane')).toHaveCount(3);
+
+            // first tab
+            await expect(project.editionForm.locator('div.tab-pane').nth(0).locator('div.form-group')).toHaveCount(5);
+            await project.checkEditionFormTextField('id', '', 'id');
+            await project.checkEditionFormTextField('Constant', 'text string', 'Constant', true);
+            await project.checkEditionFormTextField('Geometry X', '', 'Geometry X', true);
+            await project.checkEditionFormTextField('id check', '', 'id check', true);
+            await project.checkEditionFormTextField('point_name', '', 'Name');
+
+            // second tab
+            await expect(project.editionForm.locator('div.tab-pane').nth(2).locator('div.form-group')).toHaveCount(1);
+            let wrongExpressionValue = await project.getEditionFormTextFieldValue('Wrong expression', 'Wrong expression', true);
+            expect(['[%kk[% "ids" %]%]', '']).toEqual(expect.arrayContaining([wrongExpressionValue]));
+
+            // third tab
+            await expect(project.editionForm.locator('div.tab-pane').nth(1).locator('div.form-group')).toHaveCount(1);
+            await project.checkEditionFormTextField('Name check', '', 'Name check', true);
+
+            // insert a point feature: the text widgets are refreshed with the new geometry
+            let evaluateRequestPromise = project.waitForEvaluateDefaultExpressionsRequest();
+            await project.clickOnMapLegacy(488, 331);
+            let evaluateRequest = await evaluateRequestPromise;
+            let evaluateParams = new URLSearchParams(evaluateRequest.postData() ?? '');
+            const drawnGeometry = evaluateParams.get('geometry') ?? '';
+            expect(drawnGeometry).toMatch(/^POINT ?\(\S+ \S+\)$/);
+            expect(JSON.parse(evaluateParams.get('texts') ?? '')).toEqual(TEXT_WIDGETS);
+            expect(JSON.parse(evaluateParams.get('values') ?? '')).toMatchObject({
+                'id': '',
+                'point_name': '',
+            });
+
+            let evaluateResponse = await evaluateRequest.response();
+            responseExpect(evaluateResponse).toBeJson();
+            const drawnX = (await textWidgetValues(evaluateResponse))['Geometry X'];
+            expect(parseFloat(drawnX)).toBeCloseTo(parseFloat(drawnGeometry.replace(/^POINT ?\(/, '')), 10);
+            await project.checkEditionFormTextField('Geometry X', drawnX, 'Geometry X', true);
+            await project.checkEditionFormTextField('id check', '', 'id check', true);
+            await project.checkEditionFormTextField('Name check', '', 'Name check', true);
+
+            // fill the form: the text widgets are refreshed with the new name
+            evaluateRequestPromise = project.waitForEvaluateDefaultExpressionsRequest('text insert');
+            await project.fillEditionFormTextInput('point_name', 'text insert');
+            await project.editionForm.locator('#jforms_view_edition_point_name').blur();
+            evaluateRequest = await evaluateRequestPromise;
+            requestExpect(evaluateRequest).toContainParametersInPostData({
+                'layerId': LAYER_ID,
+                'geometry': drawnGeometry,
+            });
+            evaluateResponse = await evaluateRequest.response();
+            responseExpect(evaluateResponse).toBeJson();
+            expect(await textWidgetValues(evaluateResponse)).toMatchObject({
+                'Geometry X': drawnX,
+                'Name check': 'text insert',
+            });
+            await project.checkEditionFormTextField('Name check', 'text insert', 'Name check', true);
+
+            // save the form
+            let editFeatureRequestPromiseUpdate = page.waitForResponse(response => response.url().includes('editFeature'));
+            await project.editingSubmitForm('edit');
+            await editFeatureRequestPromiseUpdate;
+            await page.waitForTimeout(300);
+
+            // set new edition form instance
+            project.editionForm = page.locator('#jforms_view_edition');
+
+            const geometry = await project.editionForm.locator('#jforms_view_edition_geom').inputValue();
+
+            expect(geometry.indexOf('POINT(')).toBe(0);
+            let coords = geometry.match(/\(([^)]+)\)/) || [];
+
+            expect(coords.length).toBe(2);
+
+            const xGeom = coords[1].split(" ")[0];
+
+            expect(xGeom).toBeTruthy();
+
+            // first tab
+            await expect(project.editionForm.locator('div.tab-pane').nth(0).locator('div.form-group')).toHaveCount(5);
+            await project.checkEditionFormTextField('id', '2', 'id');
+            await project.checkEditionFormTextField('Constant', 'text string', 'Constant', true);
+            await project.checkEditionFormTextField('Geometry X', xGeom, 'Geometry X', true);
+            await project.checkEditionFormTextField('id check', '2', 'id check', true);
+            await project.checkEditionFormTextField('point_name', 'text insert', 'Name');
+
+            // second tab
+            await expect(project.editionForm.locator('div.tab-pane').nth(2).locator('div.form-group')).toHaveCount(1);
+            wrongExpressionValue = await project.getEditionFormTextFieldValue('Wrong expression', 'Wrong expression', true);
+            expect(['[%kk[% "ids" %]%]', '']).toEqual(expect.arrayContaining([wrongExpressionValue]));
+
+            // third tab
+            await expect(project.editionForm.locator('div.tab-pane').nth(1).locator('div.form-group')).toHaveCount(1);
+            await project.checkEditionFormTextField('Name check', 'text insert', 'Name check', true);
+        });
+
+        test('Text widgets follow geometry changes', async ({ page }) => {
+
+            const project = new ProjectPage(page, 'text_widget');
+            await project.open();
+
+            const formRequest = await project.openEditingFormWithLayer('Point edit');
+            await formRequest.response();
+            project.editionForm = page.locator('#jforms_view_edition');
+            await project.checkEditionFormTextField('Geometry X', '', 'Geometry X', true);
+
+            const digitizationTab = page.locator('.edition-tabs button[data-bs-target="#tabdigitization"]');
+            const formTab = page.locator('.edition-tabs button[data-bs-target="#tabform"]');
+
+            /**
+             * Type the point coordinates in the layer CRS, then check the refresh request and the text widget
+             * @param {number} x The X coordinate
+             * @param {number} y The Y coordinate
+             */
+            const typePoint = async (x, y) => {
+                await digitizationTab.click();
+                await page.locator('#edition-point-coord-crs').selectOption('4326');
+                await page.locator('#edition-point-coord-x').fill(String(x));
+                await page.locator('#edition-point-coord-y').fill(String(y));
+                // the point is moved on key up
+                await page.locator('#edition-point-coord-y').press('End');
+
+                const evaluateRequestPromise = project.waitForEvaluateDefaultExpressionsRequest();
+                await page.locator('#edition-point-coord-submit').click();
+                const evaluateRequest = await evaluateRequestPromise;
+                requestExpect(evaluateRequest).toContainParametersInPostData({
+                    'layerId': LAYER_ID,
+                    'geometry': /^POINT ?\(\S+ \S+\)$/,
+                });
+                const evaluateParams = new URLSearchParams(evaluateRequest.postData() ?? '');
+                const coords = (evaluateParams.get('geometry') ?? '').replace(/^POINT ?\(|\)$/g, '').split(' ');
+                expect(parseFloat(coords[0])).toBeCloseTo(x, 6);
+                expect(parseFloat(coords[1])).toBeCloseTo(y, 6);
+
+                const evaluateResponse = await evaluateRequest.response();
+                responseExpect(evaluateResponse).toBeJson();
+                const geometryX = (await textWidgetValues(evaluateResponse))['Geometry X'];
+                expect(parseFloat(geometryX)).toBeCloseTo(x, 6);
+
+                await formTab.click();
+                await project.checkEditionFormTextField('Geometry X', geometryX, 'Geometry X', true);
+            };
+
+            // draw the point
+            await typePoint(3.85, 43.62);
+
+            // draw it again elsewhere: the text widget follows
+            await digitizationTab.click();
+            page.once('dialog', dialog => dialog.accept());
+            await page.locator('#edition-geomtool-restart-drawing').click();
+            await typePoint(3.9, 43.6);
+
+            // the other text widgets are unchanged
+            await project.checkEditionFormTextField('Constant', 'text string', 'Constant', true);
+            await project.checkEditionFormTextField('id check', '', 'id check', true);
+            await project.checkEditionFormTextField('Name check', '', 'Name check', true);
+        });
+    });
+
+test.describe('Form upload file widget @readonly',() => {
+
+    test('File preview with path as config', async ({ page }) => {
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+        await project.open();
+
+        const layerName = 'form_edition_upload';
+        let datatablesRequest = await project.openAttributeTable(layerName);
+        let datatablesResponse = await datatablesRequest.response();
+        responseExpect(datatablesResponse).toBeJson();
+        await expect(project.attributeTableHtml(layerName).locator('tbody tr'))
+            .toHaveCount(2);
+        const theTableRow = project.attributeTableHtml(layerName).locator('tbody tr').first();
+        await expect(theTableRow.locator('a'))
+            .toHaveCount(3);
+
+        // First text_file_mandatory: lorem-2.txt in default path
+        await expect(theTableRow.locator('a').nth(0))
+            .toHaveText('text_file_mandatory')
+        await expect(theTableRow.locator('a').nth(0))
+            .toHaveAttribute('href', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(theTableRow.locator('a').nth(0))
+            .toHaveAttribute('href', /.*media\/upload\/form_edition_all_field_type\/form_edition_upload\/text_file_mandatory\/lorem-2.txt$/)
+
+        // image_file_mandatory : random-2.jpg in default root
+        await expect(theTableRow.locator('a').nth(1))
+            .toHaveText('image_file_mandatory')
+        await expect(theTableRow.locator('a').nth(1))
+            .toHaveAttribute('href', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(theTableRow.locator('a').nth(1))
+            .toHaveAttribute('href', /.*media\/upload\/form_edition_all_field_type\/form_edition_upload\/image_file_mandatory\/random-2.jpg$/)
+
+        // image_file_specific_root_folder : random-4.jpg in expression path
+        await expect(theTableRow.locator('a').nth(2))
+            .toHaveText('image_file_specific_root_folder')
+        await expect(theTableRow.locator('a').nth(2))
+            .toHaveAttribute('href', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(theTableRow.locator('a').nth(2))
+            .toHaveAttribute('href', /.*\.\.\/media\/specific_media_folder\/random-4.jpg$/)
+
+        await expect(theTableRow.locator('lizmap-feature-toolbar'))
+            .toHaveCount(1);
+        const theFeatureToolbar = theTableRow.locator('lizmap-feature-toolbar');
+        await expect(theFeatureToolbar.locator('button.feature-edit'))
+            .toHaveCount(1);
+        const theEditButton = theFeatureToolbar.locator('button.feature-edit');
+        await expect(theEditButton)
+            .toBeVisible();
+
+        // Open edit feature
+        let modifyFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('modifyFeature'));
+        await theEditButton.click();
+        let modifyFeatureRequest = await modifyFeatureRequestPromise;
+
+        let editFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('editFeature'));
+        await modifyFeatureRequest.response();
+        let editFeatureRequest = await editFeatureRequestPromise;
+        await editFeatureRequest.response();
+
+        // Check request
+        expect(modifyFeatureRequest.url()).toMatch(/layerId=form_edition_upload_[a-z0-9_]{36}&featureId=2/);
+        expect(editFeatureRequest.url()).toMatch(/layerId=form_edition_upload_[a-z0-9_]{36}&featureId=2/);
+
+        // form visible
+        await expect(page.locator('#jforms_view_edition')).toBeVisible();
+        // id
+        await expect(page.locator('#jforms_view_edition_id')).toHaveValue('2');
+        // text_file_mandatory: lorem-2.txt
+        await page.locator('#jforms_view_edition_text_file_mandatory_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_text_file_mandatory_choice_list').getByLabel('Keep')).toBeChecked();
+        await expect(page.locator('#jforms_view_edition_text_file_mandatoryoriginal')).toHaveText('lorem-2.txt');
+        // image_file_mandatory: random-2.jpg
+        await page.locator('#jforms_view_edition_image_file_mandatory_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_image_file_mandatory_choice_list').getByLabel('Keep')).toBeChecked();
+        await expect(page.locator('#jforms_view_edition_image_file_mandatoryoriginal img'))
+            .toHaveAttribute('src', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(page.locator('#jforms_view_edition_image_file_mandatoryoriginal img'))
+            .toHaveAttribute('src', /.*media%2Fupload%2Fform_edition_all_field_type%2Fform_edition_upload%2Fimage_file_mandatory%2Frandom-2.jpg$/)
+        // image_file_specific_root_folder: random-4.jpg
+        await page.locator('#jforms_view_edition_image_file_specific_root_folder_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_image_file_specific_root_folder_choice_list').getByLabel('Keep')).toBeChecked();
+        await expect(page.locator('#jforms_view_edition_image_file_specific_root_folderoriginal img'))
+            .toHaveAttribute('src', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(page.locator('#jforms_view_edition_image_file_specific_root_folderoriginal img'))
+            .toHaveAttribute('src', /.*\.\.%2Fmedia%2Fspecific_media_folder%2Frandom-4.jpg$/)
+    });
+
+    test('File preview with path not as config', async ({ page }) => {
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+        await project.open();
+
+        const layerName = 'form_edition_upload';
+        let datatablesRequest = await project.openAttributeTable(layerName);
+        let datatablesResponse = await datatablesRequest.response();
+        responseExpect(datatablesResponse).toBeJson();
+        await expect(project.attributeTableHtml(layerName).locator('tbody tr'))
+            .toHaveCount(2);
+        const theTableRow = project.attributeTableHtml(layerName).locator('tbody tr').nth(1);
+        await expect(theTableRow.locator('a'))
+            .toHaveCount(3);
+
+        // First text_file_mandatory: random-2.jpg not in default path
+        await expect(theTableRow.locator('a').nth(0))
+            .toHaveText('text_file_mandatory')
+        await expect(theTableRow.locator('a').nth(0))
+            .toHaveAttribute('href', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(theTableRow.locator('a').nth(0))
+            .toHaveAttribute('href', /.*media\/upload\/form_edition_all_field_type\/form_edition_upload\/image_file_mandatory\/random-2.jpg$/)
+
+        // image_file_mandatory : random-4.jpg not in default root
+        await expect(theTableRow.locator('a').nth(1))
+            .toHaveText('image_file_mandatory')
+        await expect(theTableRow.locator('a').nth(1))
+            .toHaveAttribute('href', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(theTableRow.locator('a').nth(1))
+            .toHaveAttribute('href', /.*\.\.\/media\/specific_media_folder\/random-4.jpg$/)
+
+        // image_file_specific_root_folder : lorem-2.txt not in expression path
+        await expect(theTableRow.locator('a').nth(2))
+            .toHaveText('image_file_specific_root_folder')
+        await expect(theTableRow.locator('a').nth(2))
+            .toHaveAttribute('href', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(theTableRow.locator('a').nth(2))
+            .toHaveAttribute('href', /.*media\/upload\/form_edition_all_field_type\/form_edition_upload\/text_file_mandatory\/lorem-2.txt$/)
+
+        await expect(theTableRow.locator('lizmap-feature-toolbar'))
+            .toHaveCount(1);
+        const theFeatureToolbar = theTableRow.locator('lizmap-feature-toolbar');
+        await expect(theFeatureToolbar.locator('button.feature-edit'))
+            .toHaveCount(1);
+        const theEditButton = theFeatureToolbar.locator('button.feature-edit');
+        await expect(theEditButton)
+            .toBeVisible();
+
+        // Open edit feature
+        let modifyFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('modifyFeature'));
+        await theEditButton.click();
+        let modifyFeatureRequest = await modifyFeatureRequestPromise;
+
+        let editFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('editFeature'));
+        await modifyFeatureRequest.response();
+        let editFeatureRequest = await editFeatureRequestPromise;
+        await editFeatureRequest.response();
+
+        // Check request
+        expect(modifyFeatureRequest.url()).toMatch(/layerId=form_edition_upload_[a-z0-9_]{36}&featureId=3/);
+        expect(editFeatureRequest.url()).toMatch(/layerId=form_edition_upload_[a-z0-9_]{36}&featureId=3/);
+
+        // form visible
+        await expect(page.locator('#jforms_view_edition')).toBeVisible();
+        // id
+        await expect(page.locator('#jforms_view_edition_id')).toHaveValue('3');
+        // text_file_mandatory: random-2.jpg
+        await page.locator('#jforms_view_edition_text_file_mandatory_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_text_file_mandatory_choice_list').getByLabel('Keep')).toBeChecked();
+        await expect(page.locator('#jforms_view_edition_text_file_mandatoryoriginal img'))
+            .toHaveAttribute('src', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(page.locator('#jforms_view_edition_text_file_mandatoryoriginal img'))
+            .toHaveAttribute('src', /.*media%2Fupload%2Fform_edition_all_field_type%2Fform_edition_upload%2Fimage_file_mandatory%2Frandom-2.jpg$/)
+        // image_file_mandatory: random-4.jpg
+        await page.locator('#jforms_view_edition_image_file_mandatory_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_image_file_mandatory_choice_list').getByLabel('Keep')).toBeChecked();
+        await expect(page.locator('#jforms_view_edition_image_file_mandatoryoriginal img'))
+            .toHaveAttribute('src', /^\/index.php\/view\/media\/getMedia?.*/)
+        await expect(page.locator('#jforms_view_edition_image_file_mandatoryoriginal img'))
+            .toHaveAttribute('src', /.*\.\.%2Fmedia%2Fspecific_media_folder%2Frandom-4.jpg$/)
+        // image_file_specific_root_folder: lorem-2.txt
+        await page.locator('#jforms_view_edition_image_file_specific_root_folder_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_image_file_specific_root_folder_choice_list').getByLabel('Keep')).toBeChecked();
+        await expect(page.locator('#jforms_view_edition_image_file_specific_root_folderoriginal')).toHaveText('lorem-2.txt');
+    });
+});
+
+test.describe('Form upload file widget @write',() => {
+
+    test('Keep file with path as config', async ({ page }) => {
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+        await project.open();
+
+        const layerName = 'form_edition_upload';
+
+        // GetFeature
+        const params = new URLSearchParams({
+            repository: 'testsrepository',
+            project: 'form_edition_all_field_type',
+        });
+        const url = `/index.php/lizmap/service?${params}`;
+        const form = {
+            SERVICE: 'WFS',
+            VERSION: '1.0.0',
+            REQUEST: 'GetFeature',
+            FEATUREID: layerName+'.2',
+            OUTPUTFORMAT: 'GeoJSON',
+        };
+        let response = await page.request.post(url, {
+            form: form
+        });
+        // check response
+        expect(response.ok()).toBeTruthy();
+        expect(response.status()).toBe(200);
+        // check content-type header
+        expect(response.headers()['content-type']).toContain('application/vnd.geo+json');
+
+        // check body
+        let body = await response.json();
+        expect(body).toHaveProperty('type', 'FeatureCollection');
+        expect(body).toHaveProperty('features');
+        expect(body.features).toHaveLength(1);
+        let feature = body.features[0];
+        expect(feature).toHaveProperty('type', 'Feature');
+        expect(feature).toHaveProperty('id', layerName+'.2');
+        expect(feature).toHaveProperty('properties');
+        expect(feature.properties).toHaveProperty('id', 2);
+        expect(feature.properties).toHaveProperty(
+            'text_file_mandatory',
+            'media/upload/form_edition_all_field_type/form_edition_upload/text_file_mandatory/lorem-2.txt'
+        );
+        expect(feature.properties).toHaveProperty(
+            'image_file_mandatory',
+            'media/upload/form_edition_all_field_type/form_edition_upload/image_file_mandatory/random-2.jpg'
+        );
+        expect(feature.properties).toHaveProperty(
+            'image_file_specific_root_folder',
+            '../media/specific_media_folder/random-4.jpg'
+        );
+
+        let datatablesRequest = await project.openAttributeTable(layerName);
+        let datatablesResponse = await datatablesRequest.response();
+        responseExpect(datatablesResponse).toBeJson();
+        await expect(project.attributeTableHtml(layerName).locator('tbody tr'))
+            .toHaveCount(2);
+
+        const theTableRow = project.attributeTableHtml(layerName).locator('tbody tr').first();
+        await expect(theTableRow.locator('lizmap-feature-toolbar'))
+            .toHaveCount(1);
+        const theFeatureToolbar = theTableRow.locator('lizmap-feature-toolbar');
+        await expect(theFeatureToolbar.locator('button.feature-edit'))
+            .toHaveCount(1);
+        const theEditButton = theFeatureToolbar.locator('button.feature-edit');
+        await expect(theEditButton)
+            .toBeVisible();
+
+        // Open edit feature
+        let modifyFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('modifyFeature'));
+        await theEditButton.click();
+        let modifyFeatureRequest = await modifyFeatureRequestPromise;
+
+        let editFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('editFeature'));
+        await modifyFeatureRequest.response();
+        let editFeatureRequest = await editFeatureRequestPromise;
+        await editFeatureRequest.response();
+
+        // check request
+        expect(modifyFeatureRequest.url()).toMatch(/layerId=form_edition_upload_[a-z0-9_]{36}&featureId=2/);
+        expect(editFeatureRequest.url()).toMatch(/layerId=form_edition_upload_[a-z0-9_]{36}&featureId=2/);
+        // form visible
+        await expect(page.locator('#jforms_view_edition')).toBeVisible();
+        // id
+        await expect(page.locator('#jforms_view_edition_id')).toHaveValue('2');
+        // text_file_mandatory
+        await page.locator('#jforms_view_edition_text_file_mandatory_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_text_file_mandatory_choice_list').getByLabel('Keep')).toBeChecked();
+        // image_file_mandatory
+        await page.locator('#jforms_view_edition_image_file_mandatory_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_image_file_mandatory_choice_list').getByLabel('Keep')).toBeChecked();
+        // image_file_specific_root_folder
+        await page.locator('#jforms_view_edition_image_file_specific_root_folder_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_image_file_specific_root_folder_choice_list').getByLabel('Keep')).toBeChecked();
+        // submit without changes
+        await page.locator('#jforms_view_edition__submit_submit').scrollIntoViewIfNeeded();
+
+        let saveFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('saveFeature'));
+        await page.locator('#jforms_view_edition__submit_submit').click();
+        let saveFeatureRequest = await saveFeatureRequestPromise;
+        let closeFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('closeFeature'));
+        await saveFeatureRequest.response();
+        let closeFeatureRequest = await closeFeatureRequestPromise;
+        await closeFeatureRequest.response();
+
+        // GetFeature to check no changes
+        response = await page.request.post(url, {
+            form: form
+        });
+        // check response
+        expect(response.ok()).toBeTruthy();
+        expect(response.status()).toBe(200);
+        // check content-type header
+        expect(response.headers()['content-type']).toContain('application/vnd.geo+json');
+
+        // check body
+        body = await response.json();
+        expect(body).toHaveProperty('type', 'FeatureCollection');
+        expect(body).toHaveProperty('features');
+        expect(body.features).toHaveLength(1);
+        feature = body.features[0];
+        expect(feature).toHaveProperty('type', 'Feature');
+        expect(feature).toHaveProperty('id', layerName+'.2');
+        expect(feature).toHaveProperty('properties');
+        expect(feature.properties).toHaveProperty('id', 2);
+        expect(feature.properties).toHaveProperty(
+            'text_file_mandatory',
+            'media/upload/form_edition_all_field_type/form_edition_upload/text_file_mandatory/lorem-2.txt'
+        );
+        expect(feature.properties).toHaveProperty(
+            'image_file_mandatory',
+            'media/upload/form_edition_all_field_type/form_edition_upload/image_file_mandatory/random-2.jpg'
+        );
+        expect(feature.properties).toHaveProperty(
+            'image_file_specific_root_folder',
+            '../media/specific_media_folder/random-4.jpg'
+        );
+    });
+
+    test('Keep file with path not as config', async ({ page }) => {
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+        await project.open();
+
+        const layerName = 'form_edition_upload';
+
+        // GetFeature
+        const params = new URLSearchParams({
+            repository: 'testsrepository',
+            project: 'form_edition_all_field_type',
+        });
+        const url = `/index.php/lizmap/service?${params}`;
+        const form = {
+            SERVICE: 'WFS',
+            VERSION: '1.0.0',
+            REQUEST: 'GetFeature',
+            FEATUREID: layerName+'.3',
+            OUTPUTFORMAT: 'GeoJSON',
+        };
+        let response = await page.request.post(url, {
+            form: form
+        });
+        // check response
+        expect(response.ok()).toBeTruthy();
+        expect(response.status()).toBe(200);
+        // check content-type header
+        expect(response.headers()['content-type']).toContain('application/vnd.geo+json');
+
+        // check body
+        let body = await response.json();
+        expect(body).toHaveProperty('type', 'FeatureCollection');
+        expect(body).toHaveProperty('features');
+        expect(body.features).toHaveLength(1);
+        let feature = body.features[0];
+        expect(feature).toHaveProperty('type', 'Feature');
+        expect(feature).toHaveProperty('id', layerName+'.3');
+        expect(feature).toHaveProperty('properties');
+        expect(feature.properties).toHaveProperty('id', 3);
+        expect(feature.properties).toHaveProperty(
+            'text_file_mandatory',
+            'media/upload/form_edition_all_field_type/form_edition_upload/image_file_mandatory/random-2.jpg'
+        );
+        expect(feature.properties).toHaveProperty(
+            'image_file_mandatory',
+            '../media/specific_media_folder/random-4.jpg'
+        );
+        expect(feature.properties).toHaveProperty(
+            'image_file_specific_root_folder',
+            'media/upload/form_edition_all_field_type/form_edition_upload/text_file_mandatory/lorem-2.txt'
+        );
+
+        let datatablesRequest = await project.openAttributeTable(layerName);
+        let datatablesResponse = await datatablesRequest.response();
+        responseExpect(datatablesResponse).toBeJson();
+        await expect(project.attributeTableHtml(layerName).locator('tbody tr'))
+            .toHaveCount(2);
+
+        const theTableRow = project.attributeTableHtml(layerName).locator('tbody tr').nth(1);
+        await expect(theTableRow.locator('lizmap-feature-toolbar'))
+            .toHaveCount(1);
+        const theFeatureToolbar = theTableRow.locator('lizmap-feature-toolbar');
+        await expect(theFeatureToolbar.locator('button.feature-edit'))
+            .toHaveCount(1);
+        const theEditButton = theFeatureToolbar.locator('button.feature-edit');
+        await expect(theEditButton)
+            .toBeVisible();
+
+        // Open edit feature
+        let modifyFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('modifyFeature'));
+        await theEditButton.click();
+        let modifyFeatureRequest = await modifyFeatureRequestPromise;
+
+        let editFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('editFeature'));
+        await modifyFeatureRequest.response();
+        let editFeatureRequest = await editFeatureRequestPromise;
+        await editFeatureRequest.response();
+
+        // check request
+        expect(modifyFeatureRequest.url()).toMatch(/layerId=form_edition_upload_[a-z0-9_]{36}&featureId=3/);
+        expect(editFeatureRequest.url()).toMatch(/layerId=form_edition_upload_[a-z0-9_]{36}&featureId=3/);
+        // form visible
+        await expect(page.locator('#jforms_view_edition')).toBeVisible();
+        // id
+        await expect(page.locator('#jforms_view_edition_id')).toHaveValue('3');
+        // text_file_mandatory
+        await page.locator('#jforms_view_edition_text_file_mandatory_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_text_file_mandatory_choice_list').getByLabel('Keep')).toBeChecked();
+        // image_file_mandatory
+        await page.locator('#jforms_view_edition_image_file_mandatory_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_image_file_mandatory_choice_list').getByLabel('Keep')).toBeChecked();
+        // image_file_specific_root_folder
+        await page.locator('#jforms_view_edition_image_file_specific_root_folder_choice_list').scrollIntoViewIfNeeded();
+        await expect(page.locator('#jforms_view_edition_image_file_specific_root_folder_choice_list').getByLabel('Keep')).toBeChecked();
+        // submit without changes
+        await page.locator('#jforms_view_edition__submit_submit').scrollIntoViewIfNeeded();
+
+        let saveFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('saveFeature'));
+        await page.locator('#jforms_view_edition__submit_submit').click();
+        let saveFeatureRequest = await saveFeatureRequestPromise;
+        let closeFeatureRequestPromise = page.waitForRequest(resquest => resquest.url().includes('closeFeature'));
+        await saveFeatureRequest.response();
+        let closeFeatureRequest = await closeFeatureRequestPromise;
+        await closeFeatureRequest.response();
+
+        // GetFeature to check no changes
+        response = await page.request.post(url, {
+            form: form
+        });
+        // check response
+        expect(response.ok()).toBeTruthy();
+        expect(response.status()).toBe(200);
+        // check content-type header
+        expect(response.headers()['content-type']).toContain('application/vnd.geo+json');
+
+        // check body
+        body = await response.json();
+        expect(body).toHaveProperty('type', 'FeatureCollection');
+        expect(body).toHaveProperty('features');
+        expect(body.features).toHaveLength(1);
+        feature = body.features[0];
+        expect(feature).toHaveProperty('type', 'Feature');
+        expect(feature).toHaveProperty('id', layerName+'.3');
+        expect(feature).toHaveProperty('properties');
+        expect(feature.properties).toHaveProperty('id', 3);
+        expect(feature.properties).toHaveProperty(
+            'text_file_mandatory',
+            'media/upload/form_edition_all_field_type/form_edition_upload/image_file_mandatory/random-2.jpg'
+        );
+        expect(feature.properties).toHaveProperty(
+            'image_file_mandatory',
+            '../media/specific_media_folder/random-4.jpg'
+        );
+        expect(feature.properties).toHaveProperty(
+            'image_file_specific_root_folder',
+            'media/upload/form_edition_all_field_type/form_edition_upload/text_file_mandatory/lorem-2.txt'
+        );
+    });
+
+    test('Upload file renamed to field default value expression stem', async ({ page }) => {
+        const project = new ProjectPage(page, 'form_edition_all_field_type');
+        await project.open();
+
+        const layerName = 'form_edition_upload';
+
+        let datatablesRequest = await project.openAttributeTable(layerName);
+        let datatablesResponse = await datatablesRequest.response();
+        responseExpect(datatablesResponse).toBeJson();
+        await expect(project.attributeTableHtml(layerName).locator('tbody tr'))
+            .toHaveCount(2);
+
+        const theTableRow = project.attributeTableHtml(layerName).locator('tbody tr').first();
+        await expect(theTableRow.locator('lizmap-feature-toolbar')).toHaveCount(1);
+        const theEditButton = theTableRow.locator('lizmap-feature-toolbar').locator('button.feature-edit');
+        await expect(theEditButton).toBeVisible();
+
+        // Open edit feature (feature 2)
+        let modifyFeatureRequestPromise = page.waitForRequest(request => request.url().includes('modifyFeature'));
+        await theEditButton.click();
+        let modifyFeatureRequest = await modifyFeatureRequestPromise;
+
+        let editFeatureRequestPromise = page.waitForRequest(request => request.url().includes('editFeature'));
+        await modifyFeatureRequest.response();
+        let editFeatureRequest = await editFeatureRequestPromise;
+        await editFeatureRequest.response();
+
+        // form visible, check it's feature 2
+        await expect(page.locator('#jforms_view_edition')).toBeVisible();
+        await expect(page.locator('#jforms_view_edition_id')).toHaveValue('2');
+
+        // Select "New file" for text_file and upload a file with an arbitrary name
+        await page.locator('#jforms_view_edition_text_file_choice_list').scrollIntoViewIfNeeded();
+        await page.locator('#jforms_view_edition_text_file_choice_list').getByLabel('New file').click();
+        await page.locator('#jforms_view_edition_text_file').setInputFiles(
+            playwrightTestFile('test_upload_file', 'test_upload_replace.txt')
+        );
+
+        // Submit
+        await page.locator('#jforms_view_edition__submit_submit').scrollIntoViewIfNeeded();
+        let saveFeatureRequestPromise = page.waitForRequest(request => request.url().includes('saveFeature'));
+        await page.locator('#jforms_view_edition__submit_submit').click();
+        let saveFeatureRequest = await saveFeatureRequestPromise;
+        let closeFeatureRequestPromise = page.waitForRequest(request => request.url().includes('closeFeature'));
+        await saveFeatureRequest.response();
+        let closeFeatureRequest = await closeFeatureRequestPromise;
+        await closeFeatureRequest.response();
+
+        // Verify via WFS: text_file should be renamed using the default value expression stem
+        // field default expression is 'test_default_doc' → stem = 'test_default_doc'
+        // uploaded file extension = '.txt' → stored as 'test_default_doc.txt'
+        const params = new URLSearchParams({
+            repository: 'testsrepository',
+            project: 'form_edition_all_field_type',
+        });
+        const url = `/index.php/lizmap/service?${params}`;
+        const wfsForm = {
+            SERVICE: 'WFS',
+            VERSION: '1.0.0',
+            REQUEST: 'GetFeature',
+            FEATUREID: layerName + '.2',
+            OUTPUTFORMAT: 'GeoJSON',
+        };
+        let response = await page.request.post(url, { form: wfsForm });
+        expect(response.ok()).toBeTruthy();
+        let body = await response.json();
+        expect(body.features).toHaveLength(1);
+        let feature = body.features[0];
+        expect(feature.properties).toHaveProperty(
+            'text_file',
+            'media/upload/form_edition_all_field_type/form_edition_upload/text_file/test_default_doc.txt'
+        );
+        // Other mandatory fields should be unchanged
+        expect(feature.properties).toHaveProperty(
+            'text_file_mandatory',
+            'media/upload/form_edition_all_field_type/form_edition_upload/text_file_mandatory/lorem-2.txt'
+        );
+        expect(feature.properties).toHaveProperty(
+            'image_file_mandatory',
+            'media/upload/form_edition_all_field_type/form_edition_upload/image_file_mandatory/random-2.jpg'
+        );
+
+        // Put text_file back to empty, as the test dataset has it. It is left set
+        // otherwise, and the "@readonly" test "File preview with path as config"
+        // then counts one link too many on the next run against the same database.
+        await theEditButton.click();
+        await expect(page.locator('#jforms_view_edition')).toBeVisible();
+        await expect(page.locator('#jforms_view_edition_id')).toHaveValue('2');
+        await page.locator('#jforms_view_edition_text_file_choice_list').scrollIntoViewIfNeeded();
+        await page.locator('#jforms_view_edition_text_file_choice_list').getByLabel('Delete').click();
+        await page.locator('#jforms_view_edition__submit_submit').scrollIntoViewIfNeeded();
+        saveFeatureRequestPromise = page.waitForRequest(request => request.url().includes('saveFeature'));
+        await page.locator('#jforms_view_edition__submit_submit').click();
+        await (await saveFeatureRequestPromise).response();
+
+        response = await page.request.post(url, { form: wfsForm });
+        body = await response.json();
+        expect(body.features[0].properties.text_file ?? '').toBe('');
+    });
+});
+
+test.describe('Form edition without creation', {tag: ['@readonly'],},() => {
+
+    test('must allow modification without creation', async ({ page }) => {
+        const project = new ProjectPage(page, 'form_edition_without_creation');
+        await project.open();
+
+        await expect(page.locator('#button-edition')).toBeVisible();
+        await page.locator('#button-edition').click();
+
+        await expect(page.locator('#edition-modification-msg')).toBeVisible();
+        await expect(page.locator('#edition-creation')).not.toBeVisible();
+
+        // Click on a feature then launch its edition form
+        let getFeatureInfoPromise = project.waitForGetFeatureInfoRequest();
+        await project.clickOnMap(630, 325);
+        let getFeatureInfoRequest = await getFeatureInfoPromise;
+        let getFeatureInfoResponse = await getFeatureInfoRequest.response();
+        responseExpect(getFeatureInfoResponse).toBeHtml();
+
+        const featureToolbar = project.popupContent.locator('lizmap-feature-toolbar[value^="quartiers_"][value$=".6"]');
+        await expect(featureToolbar).toHaveCount(1);
+        await expect(featureToolbar).toBeVisible();
+        await expect(featureToolbar.locator('button.feature-edit')).toBeVisible();
+
+        let editFeatureRequestPromise = page.waitForRequest(/lizmap\/edition\/editFeature/);
+        await featureToolbar.locator('button.feature-edit').click();
+        let editFeatureRequest = await editFeatureRequestPromise;
+        let expectedEditFeatureParameters = {
+            'layerId': /^quartiers_/,
+            'featureId': '6',
+        };
+        requestExpect(editFeatureRequest).toContainParametersInUrl(expectedEditFeatureParameters);
+        await editFeatureRequest.response();
+
+        // Only edition form should be visible...
+        await expect(page.locator('#edition-modification-msg')).not.toBeVisible();
+        await expect(page.locator('#edition-creation')).not.toBeVisible();
+        await expect(page.locator('#edition-form-container')).toBeVisible();
+
+        // .. with edition message ..
+        await expect(page.locator('#lizmap-edition-message')).toBeVisible();
+        await page.locator('#lizmap-edition-message .btn-close').click();
+        await expect(page.locator('#lizmap-edition-message')).not.toBeVisible();
+
+        // ... even after toggling dock visibility
+        await project.closeLeftDock();
+        await expect(page.locator('#edition-form-container')).not.toBeVisible();
+        await page.locator('#button-edition').click();
+
+        await expect(page.locator('#edition-modification-msg')).not.toBeVisible();
+        await expect(page.locator('#edition-creation')).not.toBeVisible();
+        await expect(page.locator('#edition-form-container')).toBeVisible();
+
+        // Cancel form edition...
+        page.on('dialog', dialog => dialog.accept());
+        await page.locator('#jforms_view_edition__submit_cancel').click();
+
+        // ...returns back to initial state
+        await expect(page.locator('#edition-modification-msg')).toBeVisible();
+        await expect(page.locator('#edition-creation')).not.toBeVisible();
+        await expect(page.locator('#edition-form-container')).not.toBeVisible();
+    });
+
+});

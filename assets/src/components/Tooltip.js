@@ -1,0 +1,65 @@
+import { html, render } from 'lit-html';
+import { mainLizmap, mainEventDispatcher } from '../modules/Globals.js';
+
+export default class Tooltip extends HTMLElement {
+    constructor() {
+        super();
+    }
+
+    connectedCallback() {
+
+        this._tooltipLayersCfgs = mainLizmap.initialConfig.tooltipLayers.layerConfigs;
+
+        this._template = () => html`
+            <select class="form-select" @change=${ event => { mainLizmap.tooltip.activate(event.target.value) }}>
+                <option value="" .selected=${mainLizmap.tooltip.activeLayerOrder === null}>---</option>
+                ${this._tooltipLayersCfgs.map(tooltipLayerCfg =>
+                    html`<option
+                            .selected=${tooltipLayerCfg.order === mainLizmap.tooltip.activeLayerOrder}
+                            value="${tooltipLayerCfg.order}">
+                            ${mainLizmap.state.layersAndGroupsCollection.getLayerByName(tooltipLayerCfg.name).title}
+                        </option>`
+                )}
+            </select>
+        `;
+
+        document.querySelector(".btn-tooltip-layer-clear").addEventListener('click', () => {
+            document.getElementById('button-tooltip-layer').click();
+        });
+
+        lizMap.events.on({
+            minidockopened: event => {
+                if ( event.id === 'tooltip-layer' ) {
+                    // Activate last selected tooltip layer
+                    mainLizmap.tooltip.activate(this.querySelector('select').value);
+                }
+            }
+        });
+
+        mainEventDispatcher.addListener(
+            () => {
+                this.classList.add('spinner');
+            },
+            ['tooltip.loading']
+        );
+
+        mainEventDispatcher.addListener(
+            () => {
+                this.classList.remove('spinner');
+            },
+            ['tooltip.loaded']
+        );
+
+        mainEventDispatcher.addListener(
+            () => {
+                render(this._template(), this);
+            },
+            ['tooltip.activated', 'tooltip.deactivated']
+        );
+
+        render(this._template(), this);
+    }
+
+    disconnectedCallback() {
+    }
+}

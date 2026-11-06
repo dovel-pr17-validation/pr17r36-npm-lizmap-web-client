@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+set -e
+
+CMD=$1;
+if [ -z "$CMD" ]; then
+    CMD="up -d"
+else
+    shift
+fi
+
+# Re-create environment
+make env
+
+if [ "$CMD" == "reset" ]; then
+    # Purge docker containers/volumes
+    make reset
+    exit 0
+elif [ "$CMD" == "build" ]; then
+    # install or update base images, to be sure we have the latest images
+    docker compose --profile=webdav --profile=swagger pull
+fi
+
+docker compose --profile=webdav --profile=swagger $CMD "$@"

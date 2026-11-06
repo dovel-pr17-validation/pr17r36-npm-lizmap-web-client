@@ -1,0 +1,1460 @@
+// @ts-check
+import { dirname } from 'path';
+import * as fs from 'fs/promises'
+import { existsSync } from 'node:fs';
+import { test, expect } from '@playwright/test';
+import { expect as requestExpect } from './fixtures/expect-request.js'
+import { expect as responseExpect } from './fixtures/expect-response.js'
+import { PrintPage } from "./pages/printpage";
+import { DrawPage } from "./pages/drawpage";
+import {
+    getAuthStorageStatePath,
+    playwrightTestFile,
+} from './globals';
+
+// To update OSM and GeoPF tiles in the mock directory
+// IMPORTANT, this must not be set to `true` while committing, on GitHub. Set to `false`.
+const UPDATE_MOCK_FILES = false;
+
+
+test.describe('Print', () => {
+
+    test.beforeEach(async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+        await printPage.open();
+        await printPage.openPrintPanel();
+        await printPage.setPrintScale('100000');
+    });
+
+    test('Print UI', async ({ page }) => {
+        // Scales
+        await expect(page.locator('#print-scale > option')).toHaveCount(6);
+        await expect(page.locator('#print-scale > option')).toContainText(
+            ['500,000', '250,000', '100,000', '50,000', '25,000', '10,000']);
+        // Templates - order must match layouts.list order in cfg
+        await expect(page.locator('#print-template > option')).toHaveCount(3);
+        await expect(page.locator('#print-template > option')).toHaveText(['print_labels', 'print_overview', 'print_map']);
+
+        // Test `print_labels` template
+
+        // Format and DPI are not displayed as there is only one value
+        await expect(page.locator('#print-format')).toHaveCount(0);
+        await expect(page.locator('.print-dpi')).toHaveCount(0);
+
+        // Test `print_map` template
+        await page.locator('#print-template').selectOption('2');
+
+        // Format and DPI lists exist as there are multiple values
+        await expect(page.locator('#print-format > option')).toHaveCount(2);
+        await expect(page.locator('#print-format > option')).toContainText(['JPEG', 'PNG']);
+        await expect(page.locator('.btn-print-dpis > option')).toHaveCount(2);
+        await expect(page.locator('.btn-print-dpis > option')).toContainText(['100', '200']);
+
+        // JPEG is default
+        expect(await page.locator('#print-format').inputValue()).toBe('jpeg');
+        // 200 DPI is default
+        expect(await page.locator('.btn-print-dpis').inputValue()).toBe('200');
+    });
+
+    test('Print custom scale mode', async ({ page }) => {
+        // Test scale mode toggle button visibility
+        const toggleButton = page.locator('.print-scale-container button');
+        await expect(toggleButton).toBeVisible();
+
+        // Initially, the select should be visible and input should be hidden
+        await expect(page.locator('#print-scale')).toBeVisible();
+        await expect(page.locator('#print-scale-custom')).not.toBeVisible();
+
+        // Toggle to custom mode by clicking the button
+        await toggleButton.click();
+
+        // Now the select should be hidden and input should be visible
+        await expect(page.locator('#print-scale')).not.toBeVisible();
+        await expect(page.locator('#print-scale-custom')).toBeVisible();
+
+        // Enter a custom scale value
+        const customInput = page.locator('#print-scale-custom');
+        await customInput.fill('75000');
+        expect(await customInput.inputValue()).toBe('75000');
+
+        // Toggle back to predefined mode
+        await toggleButton.click();
+
+        // The select should be visible again
+        await expect(page.locator('#print-scale')).toBeVisible();
+        await expect(page.locator('#print-scale-custom')).not.toBeVisible();
+    });
+
+    test('Print with custom scale value', async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+        // Test printing with a custom scale value
+        const toggleButton = page.locator('.print-scale-container button');
+
+        // Toggle to custom mode
+        await toggleButton.click();
+        await expect(page.locator('#print-scale-custom')).toBeVisible();
+
+        // Enter a custom value that doesn't exist in predefined scales
+        const customInput = page.locator('#print-scale-custom');
+        await customInput.fill('33333');
+
+        // Mock file, because we test the request, not the file
+        await page.route('**/service*', async route => {
+            const request = await route.request();
+            if (request.postData()?.includes('GetPrint')) {
+                await route.fulfill({
+                    headers: {
+                        "Content-Description": "File Transfert",
+                        "Content-Disposition": "attachment; filename=\"print_print_labels.pdf\"",
+                        "Content-Transfer-Encoding": "binary",
+                        "Content-Type": "application/pdf",
+                    },
+                    path: playwrightTestFile('mock', 'print', 'print_print_labels-33333.pdf')
+                })
+                return;
+            }
+            await route.continue();
+        });
+
+        // Wait for print request and launch it
+        const getPrintPromise = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        const getPrintRequest = await getPrintPromise;
+        // Verify the custom scale value is used in the print request
+        const expectedParameters = {
+            'SERVICE': 'WMS',
+            'REQUEST': 'GetPrint',
+            'VERSION': '1.3.0',
+            'FORMAT': 'pdf',
+            'TRANSPARENT': 'true',
+            'CRS': 'EPSG:2154',
+            'DPI': '100',
+            'TEMPLATE': 'print_labels',
+            'map0:SCALE': '33333',
+        };
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters);
+
+        responseExpect(await getPrintRequest.response()).toBePdf();
+
+        // Stop listening to WMS requests
+        await page.unroute('**/service*');
+    });
+
+    test('Print requests', async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+
+        // Mock file, because we test the request, not the file
+        await page.route('**/service*', async route => {
+            const request = await route.request();
+            const searchParams = new URLSearchParams(request.postData() ?? '');
+            if (searchParams.get('SERVICE') !== 'WMS' ||
+                !searchParams.has('REQUEST') ||
+                searchParams.get('REQUEST') !== 'GetPrint') {
+                // Continue the request for non GetPrint requests
+                await route.continue();
+                return;
+            }
+            const format = searchParams.get('FORMAT') ?? '';
+            const template = searchParams.get('TEMPLATE') ?? 'print_labels';
+            const scale = searchParams.get('map0:SCALE') ?? 100000;
+            if (format.toLowerCase().includes('pdf')) {
+                await route.fulfill({
+                    headers: {
+                        "Content-Description": "File Transfert",
+                        "Content-Disposition": `attachment; filename="print_${template}.pdf"`,
+                        "Content-Transfer-Encoding": "binary",
+                        "Content-Type": "application/pdf",
+                    },
+                    path: playwrightTestFile('mock', 'print', `print_${template}-${scale}.pdf`)
+                })
+                return;
+            }
+            if (format.toLowerCase().includes('jpeg')) {
+                await route.fulfill({
+                    headers: {
+                        "Content-Description": "File Transfert",
+                        "Content-Disposition": `attachment; filename="print_${template}.jpg"`,
+                        "Content-Transfer-Encoding": "binary",
+                        "Content-Type": "image/jpeg",
+                    },
+                    path: playwrightTestFile('mock', 'print', `print_${template}-${scale}.jpg`)
+                })
+                return;
+            }
+            await route.continue();
+        });
+
+        // Required GetPrint parameters
+        const expectedParameters = {
+            'SERVICE': 'WMS',
+            'REQUEST': 'GetPrint',
+            'VERSION': '1.3.0',
+            'FORMAT': 'pdf',
+            'TRANSPARENT': 'true',
+            'CRS': 'EPSG:2154',
+            'DPI': '100',
+            'TEMPLATE': 'print_labels',
+        }
+        // Test `print_labels` template
+        let getPrintPromise = printPage.waitForGetPrintRequest();
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        let getPrintRequest = await getPrintPromise;
+        // Extend GetPrint parameters
+        const expectedParameters1 = Object.assign({}, expectedParameters, {
+            'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+            'map0:EXTENT': /759228.\d+,6271883.\d+,781970.\d+,6286900.\d+/,
+            'map0:SCALE': '100000',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+            'simple_label': 'simple label',
+            // Enable after manually update project with QGIS 3.34 to keep label with HTML rendering
+            'multiline_label': 'Multiline label',
+        })
+        let expectedLength = 16;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters1);
+        let getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Get the mock response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+
+        // Test `print_overview` template
+        await page.locator('#print-template').selectOption('1');
+
+        getPrintPromise = printPage.waitForGetPrintRequest();
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        getPrintRequest = await getPrintPromise;
+        // Extend and update GetPrint parameters
+        const expectedParameters3 = Object.assign({}, expectedParameters, {
+            'TEMPLATE': 'print_overview',
+            'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+            'map1:EXTENT': /757917.\d+,6270794.\d+,783281.\d+,6287989.\d+/,
+            'map1:SCALE': '100000',
+            'map1:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map1:STYLES': 'default,défaut,défaut',
+            'map1:OPACITIES': '204,255,255',
+            'map0:EXTENT': /764713.\d+,62736\d\d.\d+,776385.\d+,6284[78]\d\d.\d+/,
+        })
+        expectedLength = 15
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters3);
+        getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Get the mock response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+
+        // Test `print_map` template
+        await page.locator('#print-template').selectOption('2');
+
+        getPrintPromise = printPage.waitForGetPrintRequest();
+        // Launch print
+        await printPage.launchPrint();
+
+        getPrintRequest = await getPrintPromise;
+        // Extend and update GetPrint parameters
+        const expectedParameters2 = Object.assign({}, expectedParameters, {
+            'FORMAT': 'jpeg',
+            'DPI': '200',
+            'TEMPLATE': 'print_map',
+            'map0:EXTENT': /765690.\d+,6271775.\d+,775509.\d+,6287009.\d+/,
+            'map0:SCALE': '100000',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+        })
+        expectedLength = 13
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters2);
+        getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Get the mock response
+        responseExpect(await getPrintRequest.response()).toBeImageJpeg();
+
+        // Redlining with circle
+        await page.locator('#button-draw').click();
+        await page.getByRole('button', { name: 'Toggle Dropdown' }).click();
+        await page.locator('#draw .digitizing-circle > svg').click();
+        await page.locator('#newOlMap').click({
+            position: {
+                x: 610,
+                y: 302
+            }
+        });
+        await page.locator('#newOlMap').click({
+            position: {
+                x: 722,
+                y: 300
+            }
+        });
+
+        await page.locator('#button-print').click();
+        await page.locator('#print-scale').selectOption('100000');
+
+        getPrintPromise = printPage.waitForGetPrintRequest();
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        getPrintRequest = await getPrintPromise;
+        // Extend and update GetPrint parameters
+        /* eslint-disable no-useless-escape, @stylistic/js/max-len --
+         * Block of SLD
+        **/
+        const expectedParameters4 = Object.assign({}, expectedParameters, {
+            'TEMPLATE': 'print_labels',
+            'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+            'map0:EXTENT': /759228.\d+,6271883.\d+,781970.\d+,6286900.\d+/,
+            'map0:SCALE': '100000',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+            'map0:HIGHLIGHT_GEOM': /CURVEPOLYGON\(CIRCULARSTRING\(\n +772265.\d+ 6279008.\d+,\n +775229.\d+ 6281972.\d+,\n +778193.\d+ 6279008.\d+,\n +775229.\d+ 6276044.\d+,\n +772265.\d+ 6279008.\d+\)\)/,
+            'map0:HIGHLIGHT_SYMBOL': `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+    <StyledLayerDescriptor xmlns=\"http://www.opengis.net/sld\" xmlns:ogc=\"http://www.opengis.net/ogc\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"1.1.0\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xsi:schemaLocation=\"http://www.opengis.net/sld http://schemas.opengis.net/sld/1.1.0/StyledLayerDescriptor.xsd\" xmlns:se=\"http://www.opengis.net/se\">
+            <UserStyle>
+                <FeatureTypeStyle>
+                    <Rule>
+                        <PolygonSymbolizer>
+                <Stroke>
+            <SvgParameter name=\"stroke\">#ff0000</SvgParameter>
+            <SvgParameter name=\"stroke-opacity\">1</SvgParameter>
+            <SvgParameter name=\"stroke-width\">2</SvgParameter>
+        </Stroke>
+        <Fill>
+            <SvgParameter name=\"fill\">#ff0000</SvgParameter>
+            <SvgParameter name=\"fill-opacity\">0.2</SvgParameter>
+        </Fill>
+            </PolygonSymbolizer>
+                    </Rule>
+                </FeatureTypeStyle>
+            </UserStyle>
+        </StyledLayerDescriptor>`,
+            'simple_label': 'simple label',
+            // Enable after manually update project with QGIS 3.34 to keep label with HTML rendering
+            'multiline_label': 'Multiline label',
+        })
+        /* eslint-enable no-useless-escape, @stylistic/js/max-len */
+        expectedLength = 18
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters4);
+        getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Get the mock response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+
+        // Stop listening to WMS requests
+        await page.unroute('**/service*');
+    });
+
+    test('Print requests with selection', async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+
+        // Mock file, because we test the request, not the file
+        await page.route('**/service*', async route => {
+            const request = await route.request();
+            if (request.postData()?.includes('GetPrint')) {
+                await route.fulfill({
+                    headers: {
+                        "Content-Description": "File Transfert",
+                        "Content-Disposition": "attachment; filename=\"print_print_labels.pdf\"",
+                        "Content-Transfer-Encoding": "binary",
+                        "Content-Type": "application/pdf",
+                    },
+                    path: playwrightTestFile('mock', 'print', 'print_print_labels-25000.pdf')
+                })
+                return;
+            }
+            await route.continue();
+        });
+
+        // Select a feature
+        await page.locator('#button-attributeLayers').click();
+        await page.getByRole('button', { name: 'Detail' }).click();
+        // click on select Button
+        let getSelectionTokenRequestPromise = printPage.waitForGetSelectionTokenRequest();
+        await page.locator(
+            'lizmap-feature-toolbar:nth-child(1) > div:nth-child(1) > button:nth-child(1)').first().click();
+        await page.locator('#bottom-dock-window-buttons .btn-bottomdock-clear').click();
+
+        let getSelectionTokenRequest = await getSelectionTokenRequestPromise;
+
+        // Check GetSelectionToken request
+        const getSelectionTokenParameters = {
+            'service': 'WMS',
+            'request': 'GETSELECTIONTOKEN',
+            'typename': 'quartiers',
+            'ids': '1',
+        }
+        requestExpect(getSelectionTokenRequest).toContainParametersInPostData(getSelectionTokenParameters);
+
+        // Verify the selection token response
+        let getSelectionTokenResponse = await getSelectionTokenRequest.response();
+        responseExpect(getSelectionTokenResponse).toBeJson();
+        let jsonSelectionTokenResponse = await getSelectionTokenResponse?.json();
+        expect(jsonSelectionTokenResponse).toHaveProperty('token');
+
+        const getPrintPromise = printPage.waitForGetPrintRequest();
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        const getPrintRequest = await getPrintPromise;
+        const expectedParameters = {
+            'SERVICE': 'WMS',
+            'REQUEST': 'GetPrint',
+            'VERSION': '1.3.0',
+            'FORMAT': 'pdf',
+            'TRANSPARENT': 'true',
+            'CRS': 'EPSG:2154',
+            'DPI': '100',
+            'TEMPLATE': 'print_labels',
+            'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+            'map0:EXTENT': /759228.\d+,6271883.\d+,781970.\d+,6286900.\d+/,
+            'map0:SCALE': '100000',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+            'simple_label': 'simple label',
+            // Enable after manually update project with QGIS 3.34 to keep label with HTML rendering
+            'multiline_label': 'Multiline label',
+            'SELECTIONTOKEN': /^[a-zA-Z0-9]{32}$/,
+        }
+        const expectedLength = 17;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters);
+        const getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+        expect(getPrintParams.get('SELECTIONTOKEN')).toBe(jsonSelectionTokenResponse.token);
+
+        // Stop listening to WMS requests
+        await page.unroute('**/service*');
+    });
+
+    test('Print requests with filter', async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+
+        // Mock file, because we test the request, not the file
+        await page.route('**/service*', async route => {
+            const request = await route.request();
+            if (request.postData()?.includes('GetPrint')) {
+                await route.fulfill({
+                    headers: {
+                        "Content-Description": "File Transfert",
+                        "Content-Disposition": "attachment; filename=\"print_print_labels.pdf\"",
+                        "Content-Transfer-Encoding": "binary",
+                        "Content-Type": "application/pdf",
+                    },
+                    path: playwrightTestFile('mock', 'print', 'print_print_labels-25000.pdf')
+                })
+                return;
+            }
+            await route.continue();
+        });
+
+        // Select a feature
+        await page.locator('#button-attributeLayers').click();
+        await page.getByRole('button', { name: 'Detail' }).click();
+        // click on select Button
+        let getSelectionTokenRequestPromise = printPage.waitForGetSelectionTokenRequest();
+        await page.locator(
+            'lizmap-feature-toolbar:nth-child(1) > div:nth-child(1) > button:nth-child(1)').first().click();
+        await page.locator('#bottom-dock-window-buttons .btn-bottomdock-clear').click();
+
+        let getSelectionTokenRequest = await getSelectionTokenRequestPromise;
+
+        // Check GetSelectionToken request
+        const getSelectionTokenParameters = {
+            'service': 'WMS',
+            'request': 'GETSELECTIONTOKEN',
+            'typename': 'quartiers',
+            'ids': '1',
+        }
+        requestExpect(getSelectionTokenRequest).toContainParametersInPostData(getSelectionTokenParameters);
+
+        // Verify the selection token response
+        let getSelectionTokenResponse = await getSelectionTokenRequest.response();
+        responseExpect(getSelectionTokenResponse).toBeJson();
+        let jsonSelectionTokenResponse = await getSelectionTokenResponse?.json();
+        expect(jsonSelectionTokenResponse).toHaveProperty('token');
+
+        // Filter selected feature
+        await page.locator('#button-attributeLayers').click();
+        await page.locator('.btn-filter-attributeTable').click();
+        let getFilterTokenPromise = printPage.waitForGetFilterTokenRequest();
+        let getFilterTokenRequest = await getFilterTokenPromise;
+        // Verify the filter token response
+        let getFilterTokenResponse = await getFilterTokenRequest.response();
+        responseExpect(getFilterTokenResponse).toBeJson();
+        let jsonFilterTokenResponse = await getFilterTokenResponse?.json();
+        expect(jsonFilterTokenResponse).toHaveProperty('token');
+
+        await page.locator('#bottom-dock-window-buttons .btn-bottomdock-clear').click();
+        const getPrintPromise = printPage.waitForGetPrintRequest();
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        const getPrintRequest = await getPrintPromise;
+        const expectedParameters = {
+            'SERVICE': 'WMS',
+            'REQUEST': 'GetPrint',
+            'VERSION': '1.3.0',
+            'FORMAT': 'pdf',
+            'TRANSPARENT': 'true',
+            'CRS': 'EPSG:2154',
+            'DPI': '100',
+            'TEMPLATE': 'print_labels',
+            'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+            'map0:EXTENT': /759228.\d+,6271883.\d+,781970.\d+,6286900.\d+/,
+            'map0:SCALE': '100000',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+            'simple_label': 'simple label',
+            // Enable after manually update project with QGIS 3.34 to keep label with HTML rendering
+            'multiline_label': 'Multiline label',
+            'FILTERTOKEN': /[a-z\d]+/,
+        }
+        let expectedLength = 17;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters);
+        const getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+        expect(getPrintParams.get('FILTERTOKEN')).toBe(jsonFilterTokenResponse.token);
+
+        // Stop listening to WMS requests
+        await page.unroute('**/service*');
+    });
+});
+
+test.describe(
+    'Print opacities',
+    {
+        tag: ['@readonly'],
+    },() =>
+    {
+
+        test('Group as layer', async ({ page }) => {
+
+            const printPage = new PrintPage(page, 'group_as_layer_opacity');
+            await printPage.open();
+            await printPage.openPrintPanel();
+            await printPage.setPrintScale('50000');
+
+            // set opacity of `Group_opacity` (group as layer) layer to 60%
+            await printPage.setLayerOpacity('Group_opacity','60');
+
+            // opacity notes:
+            // the `raster` layer already has 80% opacity (inherited from QGIS project)
+            // setting the opacity to 60% on the `Group_opacity` causes:
+            // - `raster` layer to have a final total opacity of 48% (0.8*0.6)
+            //          -> OPACITIES PARAM = 255*0.48 ~= 122
+            // - `single_wms_polygons` layer to have a final total opacity of 60% (1*0.6)
+            //          -> OPACITIES PARAM = 255*0.6 = 153
+            // other layers have opacity 100% (255)
+
+            const mapLayers = [
+                'OpenStreetMap',
+                'raster',
+                'single_wms_polygons',
+                'single_wms_polygons_group_as_layer',
+                'single_wms_points_group',
+            ]
+
+            const expectedParameters = {
+                'SERVICE': 'WMS',
+                'REQUEST': 'GetPrint',
+                'VERSION': '1.3.0',
+                'FORMAT': 'pdf',
+                'TRANSPARENT': 'true',
+                'CRS': 'EPSG:3857',
+                'DPI': '100',
+                'TEMPLATE': 'test',
+                'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+                'map0:EXTENT': /425181.\d+,5401407.\d+,439546.\d+,5411267.\d+/,
+                'map0:SCALE': '50000',
+                'map0:LAYERS': mapLayers.join(','),
+                'map0:STYLES': 'default,default,default,default,default',
+                'map0:OPACITIES': '255,122,153,255,255',
+            }
+            // Test `test` template
+            let getPrintPromise = printPage.waitForGetPrintRequest();
+
+            // Launch print
+            await printPage.launchPrint();
+
+            // check request
+            let getPrintRequest = await getPrintPromise;
+
+            // check response parameters
+            requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters);
+            const getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+            expect(getPrintParams.size).toBe(14);
+        })
+
+        test('Layers in group with opacity', async ({ page }) => {
+            const printPage = new PrintPage(page, 'group_as_layer_opacity');
+            await printPage.open();
+            await printPage.openPrintPanel();
+            await printPage.setPrintScale('50000');
+
+            // set opacity of `Group_a` group opacity to 60%
+            await printPage.setLayerOpacity('Group_a','60');
+            // set opacity of `single_wms_points_group` (belonging to `Group_a`) layer to 40%
+            await printPage.setLayerOpacity('single_wms_points_group','40');
+            // set opacity of `single_wms_polygons_group_as_layer` (belonging to `Group_a`) layer to 80%
+            await printPage.setLayerOpacity('single_wms_polygons_group_as_layer','80');
+
+            // opacity notes:
+            // setting the opacity to 60% on `Group_a` causes:
+            // - `single_wms_points_group` layer to have a final total opacity of 24% (0.4*0.6)
+            //              -> OPACITIES PARAM = 255*0.24 ~= 61
+            // - `single_wms_polygons_group_as_layer` layer to have a final total opacity of 48% (0.8*0.6)
+            //              -> OPACITIES PARAM = 255*0.48 ~= 122
+            // other layers have opacity 100%, except for `raster` layer which has a 80% opacity by default,
+            // resulting in a OPACITIES PARAM = 255*0.8 = 204
+
+            const mapLayers = [
+                'OpenStreetMap',
+                'raster',
+                'single_wms_polygons',
+                'single_wms_polygons_group_as_layer',
+                'single_wms_points_group',
+            ]
+
+            const expectedParameters = {
+                'SERVICE': 'WMS',
+                'REQUEST': 'GetPrint',
+                'VERSION': '1.3.0',
+                'FORMAT': 'pdf',
+                'TRANSPARENT': 'true',
+                'CRS': 'EPSG:3857',
+                'DPI': '100',
+                'TEMPLATE': 'test',
+                'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+                'map0:EXTENT': /425181.\d+,5401407.\d+,439546.\d+,5411267.\d+/,
+                'map0:SCALE': '50000',
+                'map0:LAYERS': mapLayers.join(','),
+                'map0:STYLES': 'default,default,default,default,default',
+                'map0:OPACITIES': '255,204,255,122,61',
+            }
+            // Test `test` template
+            let getPrintPromise = printPage.waitForGetPrintRequest();
+
+            // Launch print
+            await printPage.launchPrint();
+
+            // check request
+            let getPrintRequest = await getPrintPromise;
+
+            // check response parameters
+            requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters);
+            const getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+            expect(getPrintParams.size).toBe(14);
+        })
+    }
+);
+
+test.describe('Print in popup', () => {
+    test.beforeEach(async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+        await printPage.open();
+        let getFeatureInfoRequestPromise = printPage.waitForGetFeatureInfoRequest();
+        await page.locator('#newOlMap').click({ position: { x: 409, y: 186 } });
+        let getFeatureInfoRequest = await getFeatureInfoRequestPromise;
+        expect(getFeatureInfoRequest.postData()).toMatch(/GetFeatureInfo/);
+    });
+
+    test('Popup content print', async ({ page }) => {
+        const featureAtlasQuartiers = page.locator('#popupcontent lizmap-feature-toolbar[value="quartiers_cc80709a_cd4a_41de_9400_1f492b32c9f7.1"] .feature-print');
+        await expect(featureAtlasQuartiers).toHaveCount(1);
+
+        const featureAtlasSousQuartiers = page.locator('#popupcontent lizmap-feature-toolbar[value="sousquartiers_e27e6af0_dcc5_4700_9730_361437f69862.2"] .feature-print');
+        await expect(featureAtlasSousQuartiers).toHaveCount(1);
+    });
+
+    test('Atlas print in popup UI', async ({ page }) => {
+        // "quartiers" layer has one atlas (name "atlas_quartiers") button configured with a custom icon
+        const featureAtlasQuartiers = page.locator('#popupcontent lizmap-feature-toolbar[value="quartiers_cc80709a_cd4a_41de_9400_1f492b32c9f7.1"] .feature-atlas');
+        await expect(featureAtlasQuartiers).toHaveCount(1);
+        await expect(featureAtlasQuartiers.locator('button')).toHaveAttribute('data-bs-title', 'atlas_quartiers');
+        await expect(featureAtlasQuartiers.locator('img')).toHaveAttribute('src', '/index.php/view/media/getMedia?repository=testsrepository&project=print&path=media/svg/tree-fill.svg');
+
+        // "sousquartiers" layer has one atlas (name "atlas_sousquartiers") button configured with the default icon
+        const featureAtlasSousQuartiers = page.locator('#popupcontent lizmap-feature-toolbar[value="sousquartiers_e27e6af0_dcc5_4700_9730_361437f69862.2"] .feature-atlas');
+        await expect(featureAtlasSousQuartiers).toHaveCount(1);
+        await expect(featureAtlasSousQuartiers.locator('button')).toHaveAttribute('data-bs-title', 'atlas_sousquartiers');
+        await expect(featureAtlasSousQuartiers.locator('svg use')).toHaveAttribute('href', /^\/assets\/svg\/sprite\.svg.*#map-print$/);
+    });
+
+    test('Atlas print in popup requests', async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+        // Test `atlas_quartiers` print atlas request
+        const featureAtlasQuartiers = page.locator('#popupcontent lizmap-feature-toolbar[value="quartiers_cc80709a_cd4a_41de_9400_1f492b32c9f7.1"] .feature-atlas');
+
+        const getPrintPromise = printPage.waitForGetPrintAtlasRequest();
+        await featureAtlasQuartiers.locator('button').click();
+        const getPrintRequest = await getPrintPromise;
+        const expectedParameters = {
+            'SERVICE': 'WMS',
+            'REQUEST': 'GetPrintAtlas',
+            'VERSION': '1.3.0',
+            'FORMAT': 'pdf',
+            'TRANSPARENT': 'true',
+            'DPI': '100',
+            'TEMPLATE': 'atlas_quartiers',
+            'LAYER': 'quartiers',
+            'EXP_FILTER': '$id IN (1)',
+        }
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters);
+        const getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(10);
+
+        await expect(getPrintParams.has('CRS')).toBe(false)
+        await expect(getPrintParams.has('LAYERS')).toBe(false)
+        await expect(getPrintParams.has('ATLAS_PK')).toBe(false)
+
+        // Test `atlas_quartiers` print atlas response
+        const response = await getPrintRequest.response();
+        // Check response
+        responseExpect(response).toBePdf();
+        // QGIS Server returns the filename based on the atlas filenamePattern configured in the project
+        // The atlas_quartiers layout has: filenamePattern="'output_'||@atlas_featurenumber"
+        await expect(response?.headers()['content-disposition']).toBe('attachment; filename="output___@atlas_featurenumber.pdf"');
+    });
+});
+
+test.describe('Print - user in group a', () => {
+    test.use({ storageState: getAuthStorageStatePath('user_in_group_a') });
+
+    test.beforeEach(async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+        await printPage.open();
+        await printPage.openPrintPanel();
+        await printPage.setPrintScale('100000');
+    });
+
+    test('Print UI', async ({ page }) => {
+        // Templates - order must match layouts.list order in cfg
+        await expect(page.locator('#print-template > option')).toHaveCount(3);
+        await expect(page.locator('#print-template > option')).toHaveText(['print_labels', 'print_overview', 'print_map']);
+
+        // Test `print_labels` template
+
+        // Format and DPI are not displayed as there is only one value
+        await expect(page.locator('#print-format')).toHaveCount(0);
+        await expect(page.locator('.print-dpi')).toHaveCount(0);
+
+        // Test `print_map` template
+        await page.locator('#print-template').selectOption('2');
+
+        // Format and DPI lists exist as there are multiple values
+        await expect(page.locator('#print-format > option')).toHaveCount(2);
+        await expect(page.locator('#print-format > option')).toContainText(['JPEG', 'PNG']);
+        await expect(page.locator('.btn-print-dpis > option')).toHaveCount(2);
+        await expect(page.locator('.btn-print-dpis > option')).toContainText(['100', '200']);
+
+        // JPEG is default
+        expect(await page.locator('#print-format').inputValue()).toBe('jpeg');
+        // 200 DPI is default
+        expect(await page.locator('.btn-print-dpis').inputValue()).toBe('200');
+    });
+});
+
+test.describe('Print - admin', () => {
+    test.use({ storageState: getAuthStorageStatePath('admin') });
+
+    test.beforeEach(async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+        await printPage.open();
+        await printPage.openPrintPanel();
+        await printPage.setPrintScale('100000');
+    });
+
+    test('Print UI', async ({ page }) => {
+        // Templates - order must match layouts.list order in cfg
+        await expect(page.locator('#print-template > option')).toHaveCount(4);
+        await expect(page.locator('#print-template > option')).toHaveText(['print_labels', 'print_overview', 'print_map', 'print_allowed_groups']);
+
+        // Test `print_labels` template
+
+        // Format and DPI are not displayed as there is only one value
+        await expect(page.locator('#print-format')).toHaveCount(0);
+        await expect(page.locator('.print-dpi')).toHaveCount(0);
+
+        // Test `print_map` template
+        await page.locator('#print-template').selectOption('2');
+
+        // Format and DPI lists exist as there are multiple values
+        await expect(page.locator('#print-format > option')).toHaveCount(2);
+        await expect(page.locator('#print-format > option')).toContainText(['JPEG', 'PNG']);
+        await expect(page.locator('.btn-print-dpis > option')).toHaveCount(2);
+        await expect(page.locator('.btn-print-dpis > option')).toContainText(['100', '200']);
+
+        // JPEG is default
+        expect(await page.locator('#print-format').inputValue()).toBe('jpeg');
+        // 200 DPI is default
+        expect(await page.locator('.btn-print-dpis').inputValue()).toBe('200');
+
+        // Test `print_allowed_groups` template
+        await page.locator('#print-template').selectOption('3');
+
+        // Format and DPI lists exist as there are multiple values
+        await expect(page.locator('#print-format > option')).toHaveCount(4);
+        await expect(page.locator('#print-format > option')).toContainText(['PDF', 'SVG', 'PNG', 'JPEG']);
+        await expect(page.locator('.btn-print-dpis > option')).toHaveCount(3);
+        await expect(page.locator('.btn-print-dpis > option')).toContainText(['100', '200', '300']);
+
+        // PDF is default
+        expect(await page.locator('#print-format').inputValue()).toBe('pdf');
+        // 100 DPI is default
+        expect(await page.locator('.btn-print-dpis').inputValue()).toBe('100');
+    });
+});
+
+test.describe('Print 3857', () => {
+
+    test.beforeEach(async ({ page }) => {
+        const printPage = new PrintPage(page, 'print_3857');
+        await printPage.open();
+        await printPage.openPrintPanel();
+        await printPage.setPrintScale('72224');
+    });
+
+    test('Print UI', async ({ page }) => {
+        // Scales
+        await expect(page.locator('#print-scale > option')).toHaveCount(5);
+        await expect(page.locator('#print-scale > option')).toContainText(['288,895', '144,448', '72,224', '36,112', '18,056']);
+        // Templates
+        await expect(page.locator('#print-template > option')).toHaveCount(2);
+        await expect(page.locator('#print-template > option')).toContainText(['print_labels', 'print_map']);
+
+        // Test `print_labels` template
+
+        // Format and DPI are not displayed as there is only one value
+        await expect(page.locator('#print-format')).toHaveCount(0);
+        await expect(page.locator('.print-dpi')).toHaveCount(0);
+
+        // Test `print_map` template
+        await page.locator('#print-template').selectOption('1');
+
+        // Format and DPI lists exist as there are multiple values
+        await expect(page.locator('#print-format > option')).toHaveCount(2);
+        await expect(page.locator('#print-format > option')).toContainText(['JPEG', 'PNG']);
+        await expect(page.locator('.btn-print-dpis > option')).toHaveCount(2);
+        await expect(page.locator('.btn-print-dpis > option')).toContainText(['100', '200']);
+
+        // PNG is default
+        expect(await page.locator('#print-format').inputValue()).toBe('jpeg');
+        // 200 DPI is default
+        expect(await page.locator('.btn-print-dpis').inputValue()).toBe('200');
+    });
+
+    test('Print requests', async ({ page }) => {
+        const printPage = new PrintPage(page, 'print_3857');
+        // Required GetPrint parameters
+        const expectedParameters = {
+            'SERVICE': 'WMS',
+            'REQUEST': 'GetPrint',
+            'VERSION': '1.3.0',
+            'FORMAT': 'pdf',
+            'TRANSPARENT': 'true',
+            'CRS': 'EPSG:3857',
+            'DPI': '100',
+            'TEMPLATE': 'print_labels',
+        }
+        // Test `print_labels` template
+        let getPrintPromise = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        let getPrintRequest = await getPrintPromise;
+        // Extend GetPrint parameters
+        const expectedParameters1 = Object.assign({}, expectedParameters, {
+            'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+            'map0:EXTENT': /423077.\d+,5399867.\d+,439503.\d+,5410713.\d+/,
+            'map0:SCALE': '72224',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+            'simple_label': 'simple label',
+            // Enable after manually update project with QGIS 3.34 to keep label with HTML rendering
+            'multiline_label': 'Multiline label',
+        })
+        let expectedLength = 16;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters1);
+        let getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Test `print_map` template
+        await page.locator('#print-template').selectOption('1');
+        getPrintPromise = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        getPrintRequest = await getPrintPromise;
+        // Extend and update GetPrint parameters
+        const expectedParameters2 = Object.assign({}, expectedParameters, {
+            'FORMAT': 'jpeg',
+            'DPI': '200',
+            'TEMPLATE': 'print_map',
+            'map0:EXTENT': /427744.\d+,5399789.\d+,434836.\d+,5410791.\d+/,
+            'map0:SCALE': '72224',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+        })
+        expectedLength = 13;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters2);
+        getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+    });
+
+    test('Print requests with redlining', async ({ page }) => {
+        // Drawing redlining then issuing print requests is a long interaction
+        // chain that can exceed the default 30s budget under CI contention
+        // (it passed on retry). Give this test extra headroom.
+        test.slow();
+        const printPage = new PrintPage(page, 'draw');
+        const drawProject = new DrawPage(page, 'draw');
+        // Close left dock
+        await drawProject.closeLeftDock();
+        // open draw panel
+        await drawProject.openDrawPanel();
+
+        // select circle to draw
+        await drawProject.selectGeometry('circle');
+
+        // Draw circle
+        await drawProject.clickOnMap(610, 302);
+        await drawProject.clickOnMap(722, 300);
+
+
+        await printPage.openPrintPanel();
+        await printPage.setPrintScale('72224');
+
+        let getPrintPromise = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        let getPrintRequest = await getPrintPromise;
+
+        // Required GetPrint parameters
+        const expectedParameters = {
+            'SERVICE': 'WMS',
+            'REQUEST': 'GetPrint',
+            'VERSION': '1.3.0',
+            'FORMAT': 'pdf',
+            'TRANSPARENT': 'true',
+            'CRS': 'EPSG:3857',
+            'DPI': '100',
+            'TEMPLATE': 'print_labels',
+            'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+        }
+
+        // Expected GetPrint parameters
+        /* eslint-disable no-useless-escape, @stylistic/js/max-len --
+         * Block of SLD
+        **/
+        const expectedParameters1 = Object.assign({}, expectedParameters, {
+            'map0:EXTENT': /423077.\d+,5399867.\d+,439503.\d+,5410713.\d+/,
+            'map0:SCALE': '72224',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+            'map0:HIGHLIGHT_GEOM': /CURVEPOLYGON\(CIRCULARSTRING\(\n +433697.\d+ 5404736.\d+,\n +437978.\d+ 5409017.\d+,\n +442259.\d+ 5404736.\d+,\n +437978.\d+ 5400455.\d+,\n +433697.\d+ 5404736.\d+\)\)/,
+            'map0:HIGHLIGHT_SYMBOL': `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+    <StyledLayerDescriptor xmlns=\"http://www.opengis.net/sld\" xmlns:ogc=\"http://www.opengis.net/ogc\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"1.1.0\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xsi:schemaLocation=\"http://www.opengis.net/sld http://schemas.opengis.net/sld/1.1.0/StyledLayerDescriptor.xsd\" xmlns:se=\"http://www.opengis.net/se\">
+            <UserStyle>
+                <FeatureTypeStyle>
+                    <Rule>
+                        <PolygonSymbolizer>
+                <Stroke>
+            <SvgParameter name=\"stroke\">#ff0000</SvgParameter>
+            <SvgParameter name=\"stroke-opacity\">1</SvgParameter>
+            <SvgParameter name=\"stroke-width\">2</SvgParameter>
+        </Stroke>
+        <Fill>
+            <SvgParameter name=\"fill\">#ff0000</SvgParameter>
+            <SvgParameter name=\"fill-opacity\">0.2</SvgParameter>
+        </Fill>
+            </PolygonSymbolizer>
+                    </Rule>
+                </FeatureTypeStyle>
+            </UserStyle>
+        </StyledLayerDescriptor>`,
+            'simple_label': 'simple label',
+            // Enable after manually update project with QGIS 3.34 to keep label with HTML rendering
+            'multiline_label': 'Multiline label',
+        })
+        /* eslint-enable no-useless-escape, @stylistic/js/max-len */
+        let expectedLength = 18;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters1);
+        let getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Check response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+
+        // open draw panel
+        await drawProject.openDrawPanel();
+        // select point to draw
+        await drawProject.selectGeometry('point');
+        // Draw point
+        await drawProject.clickOnMap(480, 300);
+
+        // Toggle edit, two geometries are available, the text tools are not visible
+        await drawProject.toggleEdit();
+
+        // Edit second point By clicking on the map
+        await page.waitForTimeout(1000);
+        await drawProject.clickOnMap(480, 300);
+        await drawProject.setTextContentValue('test');
+
+        await printPage.openPrintPanel();
+        await printPage.setPrintScale('72224');
+
+        getPrintPromise = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        getPrintRequest = await getPrintPromise;
+
+        // Expected GetPrint parameters
+        const expectedParameters2 = Object.assign({}, expectedParameters, {
+            'map0:EXTENT': /423077.\d+,5399867.\d+,439503.\d+,5410713.\d+/,
+            'map0:SCALE': '72224',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+            'map0:HIGHLIGHT_SYMBOL': /.*/,
+            'map0:HIGHLIGHT_GEOM': /CURVEPOLYGON\(CIRCULARSTRING\([\s\d.,]*\)\);POINT\([\s\d.,]*\)/,
+            'map0:HIGHLIGHT_LABELSTRING': ' ;test',
+            'map0:HIGHLIGHT_LABELSIZE': '10;10',
+            'map0:HIGHLIGHT_LABELBUFFERCOLOR': '#FFFFFF;#FFFFFF',
+            'map0:HIGHLIGHT_LABELBUFFERSIZE': '1.5;1.5',
+            'map0:HIGHLIGHT_LABEL_ROTATION': '0;0',
+            'map0:HIGHLIGHT_LABEL_HORIZONTAL_ALIGNMENT': 'center;center',
+            'map0:HIGHLIGHT_LABEL_VERTICAL_ALIGNMENT': 'half;half',
+        });
+
+        expectedLength = 25;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters2);
+        getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Check response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+
+        // open draw panel
+        await drawProject.openDrawPanel();
+        // Activate erase tool
+        await drawProject.toggleErase();
+
+        // Delete circle
+        page.on('dialog', dialog => dialog.accept());
+        await drawProject.clickOnMap(610, 302);
+        await page.waitForTimeout(300);
+
+        await printPage.openPrintPanel();
+        await printPage.setPrintScale('72224');
+
+        getPrintPromise = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        getPrintRequest = await getPrintPromise;
+
+        // Expected GetPrint parameters
+        const expectedParameters3 = Object.assign({}, expectedParameters, {
+            'map0:EXTENT': /423077.\d+,5399867.\d+,439503.\d+,5410713.\d+/,
+            'map0:SCALE': '72224',
+            'map0:LAYERS': 'OpenStreetMap,quartiers,sousquartiers',
+            'map0:STYLES': 'default,défaut,défaut',
+            'map0:OPACITIES': '204,255,255',
+            'map0:HIGHLIGHT_SYMBOL': /.*/,
+            'map0:HIGHLIGHT_GEOM': /POINT\([\s\d.,]*\)/,
+            'map0:HIGHLIGHT_LABELSTRING': 'test',
+            'map0:HIGHLIGHT_LABELSIZE': '10',
+            'map0:HIGHLIGHT_LABELBUFFERCOLOR': '#FFFFFF',
+            'map0:HIGHLIGHT_LABELBUFFERSIZE': '1.5',
+            'map0:HIGHLIGHT_LABEL_ROTATION': '0',
+            'map0:HIGHLIGHT_LABEL_HORIZONTAL_ALIGNMENT': 'center',
+            'map0:HIGHLIGHT_LABEL_VERTICAL_ALIGNMENT': 'half',
+        });
+
+        expectedLength = 25;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters3);
+        getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Check response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+    });
+});
+
+test.describe('Print 2278', () => {
+
+    const locale = 'en-US';
+
+    test.beforeEach(async ({ page }) => {
+        const printPage = new PrintPage(page, 'texas_2278');
+        await printPage.open();
+        await printPage.openPrintPanel();
+    });
+
+    test('Print UI', async ({ page }) => {
+        // Scales
+        await expect(page.locator('#print-scale > option')).toHaveCount(10);
+        await expect(page.locator('#print-scale > option')).toContainText([
+            '10,000,000', '5,000,000', '2,500,000',
+            '1,000,000', '500,000', '250,000',
+            '100,000', '50,000', '25,000',
+            '10,000',
+        ]);
+        // Templates
+        await expect(page.locator('#print-template > option')).toHaveCount(1);
+        await expect(page.locator('#print-template > option')).toContainText(['A4-portrait']);
+
+        // Format and DPI are not displayed as there is only one value
+        await expect(page.locator('#print-format')).toHaveCount(0);
+        await expect(page.locator('.print-dpi')).toHaveCount(0);
+    });
+
+    test('Print scales linked to zoom', async ({ page }) => {
+        // Check scale
+        await expect(page.locator('#overview-bar .ol-scale-text')).toHaveText('1 : ' + (10000000).toLocaleString(locale));
+
+        // Check selected print scale
+        await expect(page.locator('#print-scale')).toHaveValue('10000000');
+
+        // Close print panel
+        const printPage = new PrintPage(page, 'texas_2278');
+        await printPage.closePrintPanel();
+
+        // Zoom in
+        printPage.zoomIn();
+
+        // Check scale
+        await expect(page.locator('#overview-bar .ol-scale-text')).toHaveText('1 : ' + (5000000).toLocaleString(locale));
+
+        // Zoom in
+        printPage.zoomIn();
+
+        // Check scale
+        await expect(page.locator('#overview-bar .ol-scale-text')).toHaveText('1 : ' + (2500000).toLocaleString(locale));
+
+        // Open print panel
+        await printPage.openPrintPanel();
+
+        // Check selected print scale
+        await expect(page.locator('#print-scale')).toHaveValue('2500000');
+    });
+});
+
+test.describe('Print base layers', () => {
+    test.beforeEach(async ({ page }) => {
+        // Catch openstreetmap requests to mock them
+        /** @type {string[]} */
+        let GetTiles = [];
+        await page.route('https://tile.openstreetmap.org/*/*/*.png', async (route) => {
+            const request = route.request();
+            GetTiles.push(request.url());
+
+            // Build path file in mock directory
+            const pathFile = playwrightTestFile('mock', 'base_layers', 'osm' , 'tiles' + (new URL(request.url()).pathname));
+            if (UPDATE_MOCK_FILES && GetTiles.length <= 6) {
+                // Save file in mock directory for 6 tiles maximum
+                const response = await route.fetch();
+                await fs.mkdir(dirname(pathFile), { recursive: true });
+                await fs.writeFile(pathFile, new Uint8Array(await response.body()));
+            } else if (existsSync(pathFile)) {
+                // fulfill route's request with mock file
+                await route.fulfill({
+                    path: pathFile
+                })
+            } else {
+                // fulfill route's request with default transparent tile
+                await route.fulfill({
+                    path: playwrightTestFile('mock', 'transparent_tile.png')
+                })
+            }
+        });
+
+        const printPage = new PrintPage(page, 'base_layers');
+        await printPage.open();
+        await printPage.openPrintPanel();
+        await printPage.setPrintScale('72224');
+
+        while (GetTiles.length < 6) {
+            await page.waitForTimeout(100);
+        }
+        expect(GetTiles.length).toBeGreaterThanOrEqual(6);
+
+        // Remove listen to osm tiles
+        await page.unroute('https://tile.openstreetmap.org/*/*/*.png');
+    });
+
+    test('Print requests', async ({ page }) => {
+        const printPage = new PrintPage(page, 'base_layers');
+
+        // Required GetPrint parameters
+        const expectedParameters = {
+            'SERVICE': 'WMS',
+            'REQUEST': 'GetPrint',
+            'VERSION': '1.3.0',
+            'FORMAT': 'pdf',
+            'TRANSPARENT': 'true',
+            'CRS': 'EPSG:3857',
+            'DPI': '100',
+            'TEMPLATE': 'simple',
+            'FORMAT_OPTIONS': 'TEXT_RENDER_FORMAT:AlwaysText',
+            'map0:EXTENT': /420548.\d+,5397710.\d+,441999.\d+,5412877.\d+/,
+            'map0:SCALE': '72224',
+        }
+        // Print osm-mapnik
+        let getPrintRequestPromise = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        let getPrintRequest = await getPrintRequestPromise;
+        // Extend GetPrint parameters
+        const expectedParameters1 = Object.assign({}, expectedParameters, {
+            'map0:LAYERS': 'osm-mapnik',
+            'map0:STYLES': 'défaut',
+            'map0:OPACITIES': '255',
+        })
+        let expectedLength = 14;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters1);
+        let getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Check response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+
+        // Print osm-mapnik & quartiers
+        let getMapRequestPromise = page.waitForRequest(/REQUEST=GetMap/);
+        await page.getByLabel('quartiers').check();
+        let getMapRequest = await getMapRequestPromise;
+        await getMapRequest.response();
+
+        getPrintRequestPromise = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        getPrintRequest = await getPrintRequestPromise;
+        // Extend and update GetPrint parameters
+        const expectedParameters2 = Object.assign({}, expectedParameters, {
+            'map0:LAYERS': 'osm-mapnik,quartiers',
+            'map0:STYLES': 'défaut,default',
+            'map0:OPACITIES': '255,255',
+        })
+        expectedLength = 14;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters2);
+        getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Check response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+
+        // Print quartiers not open-topo-map
+        // Catch opentopomap request to mock them
+        /** @type {string[]} */
+        let GetTiles = [];
+        await page.route('https://*.tile.opentopomap.org/*/*/*.png', async (route) => {
+            const request = route.request();
+            GetTiles.push(request.url());
+
+            // Build path file in mock directory
+            const pathFile = playwrightTestFile('mock', 'base_layers', 'opentopomap' , 'tiles' + (new URL(request.url()).pathname));
+            if (UPDATE_MOCK_FILES && GetTiles.length <= 6) {
+                // Save file in mock directory for 6 tiles maximum
+                try {
+                    const response = await route.fetch();
+                    await fs.mkdir(dirname(pathFile), { recursive: true });
+                    await fs.writeFile(pathFile, new Uint8Array(await response.body()));
+                } catch {
+
+                    // fulfill route's request with default transparent tile
+                    await route.fulfill({
+                        path: playwrightTestFile('mock', 'transparent_tile.png')
+                    })
+                }
+            } else if (existsSync(pathFile)) {
+                // fulfill route's request with mock file
+                await route.fulfill({
+                    path: pathFile
+                })
+            } else {
+                // fulfill route's request with default transparent tile
+                await route.fulfill({
+                    path: playwrightTestFile('mock', 'transparent_tile.png')
+                })
+            }
+        });
+        await page.locator('#switcher-baselayer').getByRole('combobox').selectOption('open-topo-map');
+
+        while (GetTiles.length < 6) {
+            await page.waitForTimeout(100);
+        }
+        await expect(GetTiles.length).toBeGreaterThanOrEqual(6);
+
+        // Remove listen to opentopomap tiles
+        await page.unroute('https://*.tile.opentopomap.org/*/*/*.png');
+
+        getPrintRequestPromise  = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        getPrintRequest = await getPrintRequestPromise;
+        // Extend and update GetPrint parameters
+        const expectedParameters3 = Object.assign({}, expectedParameters, {
+            'map0:LAYERS': 'quartiers',
+            'map0:STYLES': 'default',
+            'map0:OPACITIES': '255',
+        })
+        expectedLength = 14;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters3);
+        getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+
+        // Check response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+
+        // Print quartiers_baselayer & quartiers
+        await page.locator('#switcher-baselayer').getByRole('combobox').selectOption('quartiers_baselayer');
+        getMapRequest = await getMapRequestPromise;
+        await getMapRequest.response();
+
+        getPrintRequestPromise  = printPage.waitForGetPrintRequest();
+
+        // Launch print
+        await printPage.launchPrint();
+
+        // check request
+        getPrintRequest = await getPrintRequestPromise;
+        // Extend and update GetPrint parameters
+        const expectedParameters4 = Object.assign({}, expectedParameters, {
+            'map0:LAYERS': 'quartiers_baselayer,quartiers',
+            'map0:STYLES': 'default,default',
+            'map0:OPACITIES': '255,255',
+        })
+        expectedLength = 14;
+        requestExpect(getPrintRequest).toContainParametersInPostData(expectedParameters4);
+        getPrintParams = new URLSearchParams(getPrintRequest?.postData() ?? '');
+        expect(getPrintParams.size).toBe(expectedLength);
+        // Check response
+        responseExpect(await getPrintRequest.response()).toBePdf();
+    });
+});
+
+test.describe('Error while printing', () => {
+
+    test.beforeEach(async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+        await printPage.open();
+    });
+
+    test('Print error', async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+        await printPage.openPrintPanel();
+        await printPage.setPrintScale('100000');
+
+        await page.route('**/service*', async route => {
+            if (route.request()?.postData()?.includes('GetPrint')) {
+                await route.fulfill({
+                    status: 404,
+                    contentType: 'text/plain',
+                    body: 'Not Found!'
+                });
+                return;
+            }
+            await route.continue();
+        });
+
+        await page.locator('#print-launch').click();
+
+        await expect(
+            page.getByText('The output is currently not available. Please contact the system administrator.')
+        ).toBeVisible();
+
+        await expect(page.locator("#message > div:last-child")).toHaveClass(/alert-danger/);
+
+        // Stop listening to WMS requests
+        await page.unroute('**/service*');
+    });
+
+
+    test('Print Atlas error', async ({ page }) => {
+
+        let getFeatureInfoRequestPromise = page.waitForRequest(
+            request =>
+                request.method() === 'POST' &&
+                request.postData()?.includes('GetFeatureInfo') === true
+        );
+        await page.locator('#newOlMap').click({ position: { x: 409, y: 186 } });
+        let getFeatureInfoRequest = await getFeatureInfoRequestPromise;
+        expect(getFeatureInfoRequest.postData()).toMatch(/GetFeatureInfo/);
+
+        // Test `atlas_quartiers` print atlas request
+        const featureAtlasQuartiers = page.locator(
+            '#popupcontent lizmap-feature-toolbar[value="quartiers_cc80709a_cd4a_41de_9400_1f492b32c9f7.1"] .feature-atlas'
+        );
+
+        await page.route('**/service*', async route => {
+            if (route.request()?.postData()?.includes('GetPrint')) {
+                await route.fulfill({
+                    status: 404,
+                    contentType: 'text/plain',
+                    body: 'Not Found!'
+                });
+                return;
+            }
+            await route.continue();
+        });
+
+        await featureAtlasQuartiers.locator('button').click();
+
+        await expect(page.getByText(
+            'The output is currently not available. Please contact the system administrator.'
+        )).toBeVisible();
+
+        await expect(page.locator("#message > div:last-child")).toHaveClass(/alert-danger/);
+
+        // Stop listening to WMS requests
+        await page.unroute('**/service*');
+    });
+
+    test('Remove print overlay when switching to another minidock', async ({ page }) => {
+        const printPage = new PrintPage(page, 'print');
+        await printPage.openPrintPanel();
+
+        await page.locator('#button-selectiontool').click();
+
+        await expect(page.locator('.ol-unselectable > canvas')).toHaveCount(0);
+    });
+});

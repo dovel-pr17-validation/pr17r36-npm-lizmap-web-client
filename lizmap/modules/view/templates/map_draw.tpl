@@ -1,0 +1,16 @@
+<div class="draw">
+    <h3>
+        <span class="title">
+            <button type="button" class="btn-draw-clear btn-close"
+                title="{@view~map.toolbar.content.stop@}" onclick="document.querySelector('#button-draw').click();"></button>
+            <svg>
+                <use href="{$j_basepath}assets/svg/sprite.svg?{$j_assetsRevision}#pencil"/>
+            </svg>
+            <span class="text">&nbsp;{@view~map.draw.navbar.title@}&nbsp;</span>
+        </span>
+    </h3>
+
+    <div class="menu-content">
+        <lizmap-digitizing context="draw" save import-export measure text-tools></lizmap-digitizing>
+    </div>
+</div>

@@ -1,0 +1,68 @@
+// @ts-check
+import { test, expect } from '@playwright/test';
+import { ProjectPage } from './pages/project';
+
+test.describe('Form relational values', () => {
+
+    test.beforeEach(async ({ page }) => {
+        const project = new ProjectPage(page, 'form_type_relational_value');
+        await project.open();
+
+        const formRequest = await project.openEditingFormWithLayer('table_for_form');
+        await formRequest.response();
+    });
+
+    test('Checkboxes relational values', async ({ page }) => {
+        const groups = [
+            { groupName: "test", count: 3, expectRequired: false },
+            { groupName: "test_not_null_only", count: 3, expectRequired: true },
+            { groupName: "test_empty_value_only", count: 4, expectRequired: false }
+        ];
+        for (let group of groups) {
+            // group label
+            let locatorGroup = page.locator('#jforms_view_edition_' + group.groupName + '_label');
+            if (group.expectRequired) {
+                await expect(locatorGroup).toHaveClass(/jforms-required/);
+            } else {
+                await expect(locatorGroup).not.toHaveClass(/jforms-required/);
+            }
+            // 1 checkbox for each value in the group
+            await expect(
+                page.locator('#jforms_view_edition input[name="' + group.groupName + '[]"]')
+            ).toHaveCount(group.count);
+            // 1 label for each checkbox
+            await expect(
+                page.locator(
+                    '#jforms_view_edition label.checkbox.jforms-chkbox.jforms-ctl-' + group.groupName + ' input'
+                )
+            ).toHaveCount(group.count);
+            // each option has or not the class jforms-required
+            for (let i = 0; i < group.count; i++) {
+                let locatorCheckbox = page.locator('#jforms_view_edition_' + group.groupName + '_' + i);
+                if (group.expectRequired) {
+                    await expect(locatorCheckbox).toHaveClass(/jforms-required/);
+                } else {
+                    await expect(locatorCheckbox).not.toHaveClass(/jforms-required/);
+                }
+
+            }
+
+        }
+
+    });
+
+    test('Not editable relational values with multiple selections @readonly', async ({ page }) => {
+        const checkboxes = page.locator('#jforms_view_edition input[name="test_readonly[]"]');
+        await expect(checkboxes).toHaveCount(3);
+        for (const checkbox of await checkboxes.all()) {
+            await expect(checkbox).toHaveClass(/jforms-readonly/);
+            // The readonly attribute is ignored by browsers for checkboxes
+            await expect(checkbox).toBeDisabled();
+        }
+
+        // Editable relational values are not disabled
+        for (const checkbox of await page.locator('#jforms_view_edition input[name="test[]"]').all()) {
+            await expect(checkbox).toBeEnabled();
+        }
+    });
+});

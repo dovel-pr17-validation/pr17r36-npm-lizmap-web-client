@@ -1,0 +1,51 @@
+<?php
+
+use Lizmap\Request\WMSRequest;
+
+class WMSRequestForTests extends WMSRequest
+{
+    public function getContextForTests()
+    {
+        return $this->process_getcontext();
+    }
+
+    public function checkMaximumWidthHeightForTests()
+    {
+        return $this->checkMaximumWidthHeight();
+    }
+
+    public function useCacheForTests($configLayer, $params, $profile)
+    {
+        return $this->useCache($configLayer, $params, $profile);
+    }
+
+    public function getImageDataForTests($data, $params, $originalParams, $xFactor, $yFactor)
+    {
+        return $this->getImageData($data, $params, $originalParams, $xFactor, $yFactor);
+    }
+
+    public function getRegexpMediaUrlsForTests()
+    {
+        return self::$regexp_media_urls;
+    }
+
+    public function replaceMediaPathByMediaUrlForTests($matches)
+    {
+        return '"getMedia?path='.$matches[1].'"';
+    }
+
+    public function applyCheckBoxesToFormPopupForTests($html, $checkBoxFields)
+    {
+        return $this->applyCheckBoxesToFormPopup($html, $checkBoxFields);
+    }
+
+    public static function matchCheckBoxStateForTests($value, $checkedExpected, $uncheckedExpected)
+    {
+        return self::matchCheckBoxState($value, $checkedExpected, $uncheckedExpected);
+    }
+
+    public static function buildAllFeaturesTableDataForTests($allFeatureAttributes)
+    {
+        return self::buildAllFeaturesTableData($allFeatureAttributes);
+    }
+}

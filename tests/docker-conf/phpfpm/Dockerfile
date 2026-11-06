@@ -1,0 +1,55 @@
+ARG php_version=8.2
+
+FROM 3liz/liz-php-fpm:${php_version}
+
+ARG php_version
+ARG node_major=22
+ARG DEBIAN_FRONTEND=noninteractive
+ENV PHP_VERSION=${php_version}
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get -y install ldap-utils \
+    libsqlite3-mod-spatialite \
+    php${PHP_VERSION}-xdebug \
+    ; apt-get clean
+
+# Install nodejs and npm to build js files.
+# node_major is passed in as a build-arg (see tests/docker-compose.yml's
+# lizmap.build.args.node_major, sourced from the repo-root .nvmrc by
+# tests/Makefile's `env` target) so this file never hardcodes a Node
+# major version that can drift from the repo's single source of truth.
+RUN apt-get install -y ca-certificates curl gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${node_major}.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install nodejs libfcgi-bin -y
+
+RUN set -eux; \
+    mkdir -p /etc/openldap/ /etc/ssl/ldap/; \
+    chmod 755 /etc/openldap/ /etc/ssl/ldap/; \
+    mkdir -p /srv/sqlite_ext; \
+    sed -i "/^;sqlite3.extension_dir =/c\sqlite3.extension_dir = \/srv\/sqlite_ext\/" /etc/php/${PHP_VERSION}/fpm/php.ini; \
+    cp /usr/lib/x86_64-linux-gnu/mod_spatialite.so /srv/sqlite_ext/mod_spatialite.so
+
+COPY ldap.conf /etc/openldap/ldap.conf
+COPY lizmap-entrypoint.sh /bin/entrypoint.d/
+COPY appctl.sh /bin/
+COPY profile.start /etc/profile.d/start
+COPY xdebug.ini /etc/php/${PHP_VERSION}/fpm/conf.d/90-xdebug.ini
+
+## Install healtcheck script
+COPY php-fpm-healthcheck /usr/local/bin/
+
+RUN chmod 755 /bin/entrypoint.d/lizmap-entrypoint.sh /bin/appctl.sh /usr/local/bin/php-fpm-healthcheck; \
+    git config --global --add safe.directory /srv/lzm;
+
+HEALTHCHECK \
+    --interval=30s \
+    --timeout=30s \
+    --start-interval=2s \
+    --start-period=10s \
+    CMD php-fpm-healthcheck || exit 1
+
+WORKDIR /srv/lzm/

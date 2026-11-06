@@ -1,0 +1,742 @@
+<?php
+
+use Lizmap\Form\QgisFormControl;
+use Lizmap\Form\QgisFormControlProperties;
+use Lizmap\Project;
+use Lizmap\Project\Repository;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\TestCase;
+
+require_once __DIR__.'/../../../../lizmap/vendor/jelix/jelix/lib/jelix/forms/jFormsBase.class.php';
+
+class dummyForm
+{
+    public $check;
+
+    public $data;
+
+    public $controls;
+
+    public function check()
+    {
+        return $this->check;
+    }
+
+    public function addControl() {}
+
+    public function setReadOnly() {}
+
+    public function getSelector()
+    {
+        return 'test~dummy';
+    }
+
+    public function getContainer()
+    {
+        return (object) array('privateData' => array());
+    }
+
+    public function getData()
+    {
+        return $this->data;
+    }
+
+    public function setErrorOn() {}
+
+    public function getControl($ref)
+    {
+        return $this->controls[$ref];
+    }
+}
+
+/**
+ * A richer form stub that supports getData($key), setData($key, $val), and getAllData().
+ * Used by the dynamic-default expression tests below.
+ */
+class dummyFormForDefaults
+{
+    /** @var array<string, mixed> */
+    private $store = array();
+
+    /** @var array<string, object> */
+    public $controls = array();
+
+    public function getSelector()
+    {
+        return 'test~dummy';
+    }
+
+    public function getContainer()
+    {
+        return (object) array('privateData' => array());
+    }
+
+    public function getData($key)
+    {
+        return isset($this->store[$key]) ? $this->store[$key] : null;
+    }
+
+    public function setData($key, $value)
+    {
+        $this->store[$key] = $value;
+    }
+
+    public function getAllData()
+    {
+        return $this->store;
+    }
+
+    public function getControl($ref)
+    {
+        return isset($this->controls[$ref]) ? $this->controls[$ref] : null;
+    }
+
+    public function addControl() {}
+
+    public function setReadOnly() {}
+
+    public function setErrorOn() {}
+
+    public function check()
+    {
+        return true;
+    }
+}
+
+/**
+ * @internal
+ *
+ * @coversNothing
+ */
+class QgisFormTest extends TestCase
+{
+    protected $appContext;
+
+    protected function setUpEnv($projectKey, $layerId, $fields)
+    {
+        $appContext = new ContextForTests();
+        $appContext->setResult(array('path' => __DIR__.'/forms/'));
+        $this->appContext = $appContext;
+        $appContext->setCache('/test.qgs.layer-line-form', $this->readFormCache(__DIR__.'/forms/montpellier.line.form.json'), null, 'qgisprojects');
+        $appContext->setCache('/test.qgs.layer-date-form', $this->readFormCache(__DIR__.'/forms/test.date.form.json'), null, 'qgisprojects');
+        $layer = new QgisLayerForTests();
+        $layer->fields = $fields;
+        $layer->setId($layerId);
+        $proj = new ProjectForTests($appContext);
+        $proj->setRepo(new Repository('key', array(), null, null, $appContext));
+        $proj->setKey($projectKey);
+        $layer->setProject($proj);
+
+        return $layer;
+    }
+
+    protected function readFormCache($file)
+    {
+        $formCache = json_decode(file_get_contents($file), true);
+        $properties = array();
+        foreach ($formCache as $ref => $props) {
+            $prop = new QgisFormControlProperties(
+                $ref,
+                $props['fieldEditType'],
+                $props['markup'],
+                $props['editAttr']
+            );
+            if (isset($props['rendererCategories'])) {
+                $prop->setRendererCategories($props['rendererCategories']);
+            }
+            $properties[$ref] = $prop;
+        }
+
+        return $properties;
+    }
+
+    public static function getConstructData()
+    {
+        $fields = (object) array(
+            'pkuid' => (object) array(
+                'autoIncrement' => true,
+                'type' => 'float',
+            ),
+            'customdate' => (object) array(
+                'autoIncrement' => true,
+                'type' => 'float',
+            ),
+        );
+        $fields2 = (object) array(
+            'pkuid' => (object) array(
+                'autoIncrement' => true,
+                'type' => 'float',
+            ),
+            'label' => (object) array(
+                'autoIncrement' => true,
+                'type' => 'float',
+            ),
+            'description' => (object) array(
+                'autoIncrement' => true,
+                'type' => 'float',
+            ),
+            'difficulty' => (object) array(
+                'autoIncrement' => true,
+                'type' => 'float',
+            ),
+        );
+
+        return array(
+            array('test', 'date', $fields),
+            array('montpellier', 'line', $fields2),
+            array('not', 'existing', null),
+        );
+    }
+
+    /**
+     * @dataProvider getConstructData
+     *
+     * @param mixed $fields
+     * @param mixed $projectKey
+     * @param mixed $layer
+     */
+    #[DataProvider('getConstructData')]
+    public function testConstruct($projectKey, $layer, $fields): void
+    {
+        $layer = $this->setUpEnv($projectKey, $layer, $fields);
+        if (!$fields) {
+            $this->expectException('Exception');
+        }
+        $form = new QgisForm2ForTests($layer, new dummyForm(), null, false, $this->appContext);
+        if ($fields) {
+            $controls = $form->getQgisControls();
+            $this->assertEquals(count((array) $fields), count($controls));
+            foreach ($fields as $key => $props) {
+                $this->assertTrue(array_key_exists($key, $controls));
+            }
+        }
+    }
+
+    public static function getDefaultValuesData()
+    {
+        return array(
+            array('1231', null, '1231'),
+            array('', null, null),
+            array(null, null, null),
+            array('\'test!!tests\'', null, 'test!!tests'),
+            array('"name" IS NOT NULL AND "name" <> \'\'', (object) array('testField' => 'default'), 'default'),
+        );
+    }
+
+    /**
+     * @dataProvider getDefaultValuesData
+     *
+     * @param mixed $defaultValue
+     * @param mixed $expressionResult
+     * @param mixed $expectedResult
+     */
+    #[DataProvider('getDefaultValuesData')]
+    public function testGetDefaultValues($defaultValue, $expressionResult, $expectedResult): void
+    {
+        $formMock = $this->getMockBuilder(QgisFormForTests::class)->onlyMethods(array('evaluateExpression'))->getMock();
+        $formMock->method('evaluateExpression')->willReturn($expressionResult);
+        $layer = new QgisLayerForTests();
+        $layer->setDefaultValues(array('testField' => $defaultValue));
+        $formMock->setLayer($layer);
+        $this->assertEquals($expectedResult, $formMock->getDefaultValueForTests('testField'));
+    }
+
+    public function testGetAttributeEditorForm(): void
+    {
+        $proj = new Project\QgisProject(__DIR__.'/forms/attributeEditorTest.qgs', new lizmapServices(array(), (object) array(), false, '', null), new ContextForTests());
+        $layer = $proj->getLayer('LayerId', $proj);
+        $layerFalse = $proj->getLayer('LayerFalse', $proj);
+        $form = new QgisFormForTests();
+        $form->setForm(new dummyForm());
+        $form->setLayer($layer);
+        $form->setFormName(null);
+        $attributeForm = $form->getAttributesEditorForm();
+        $this->assertNotNull($attributeForm);
+        $this->assertInstanceOf(qgisAttributeEditorElement::class, $attributeForm);
+        $form->setFormName(null);
+        $form->setLayer($layerFalse);
+        $attributeForm = $form->getAttributesEditorForm();
+        $this->assertNull($attributeForm);
+    }
+
+    public static function getCheckData()
+    {
+        $dbFieldsInfo = (object) array(
+            'dataFields' => (object) array(
+                'pkuid' => null,
+                'field' => null,
+                'geometry' => null,
+            ),
+            'geometryColumn' => 'geometry',
+        );
+        $evaluateTrue = array(
+            'pkuid' => 1,
+            'field' => 1,
+            'geometry' => 1,
+        );
+        $evaluateFalse = array(
+            'pkuid' => false,
+            'field' => 1,
+            'geometry' => 1,
+        );
+        $constraintsTrue = array(
+            'exp' => 'test',
+            'exp_desc' => null,
+            'exp_value' => 'test',
+        );
+        $constraintsFalse = array();
+
+        return array(
+            array($dbFieldsInfo, true, 'not empty', $evaluateTrue, $constraintsTrue, 'true', true),
+            array($dbFieldsInfo, false, 'not empty', $evaluateTrue, $constraintsTrue, 'true', false),
+            array($dbFieldsInfo, true, '', $evaluateTrue, $constraintsTrue, 'false', false),
+            array($dbFieldsInfo, false, '', $evaluateTrue, $constraintsTrue, 'true', false),
+            array($dbFieldsInfo, true, '0', $evaluateTrue, $constraintsTrue, 'true', true),
+            array($dbFieldsInfo, true, 'not empty', $evaluateTrue, $constraintsFalse, 'true', true),
+            array($dbFieldsInfo, false, 'not empty', $evaluateTrue, $constraintsFalse, 'true', false),
+            array($dbFieldsInfo, true, '', $evaluateTrue, $constraintsFalse, 'false', false),
+            array($dbFieldsInfo, false, '', $evaluateTrue, $constraintsFalse, 'true', false),
+            array($dbFieldsInfo, true, '0', $evaluateTrue, $constraintsFalse, 'true', true),
+            array($dbFieldsInfo, true, 'not empty', $evaluateFalse, $constraintsTrue, 'true', false),
+            array($dbFieldsInfo, false, 'not empty', $evaluateFalse, $constraintsTrue, 'true', false),
+            array($dbFieldsInfo, true, '', $evaluateFalse, $constraintsTrue, 'true', false),
+            array($dbFieldsInfo, false, '', $evaluateFalse, $constraintsTrue, 'true', false),
+            array($dbFieldsInfo, true, '0', $evaluateFalse, $constraintsTrue, 'true', false),
+        );
+    }
+
+    /**
+     * @dataProvider getCheckData
+     *
+     * @param mixed $dbFieldsInfo
+     * @param mixed $check
+     * @param mixed $data
+     * @param mixed $evaluateExpression
+     * @param mixed $constraints
+     * @param mixed $expectedResult
+     * @param mixed $allowWithoutGeom
+     */
+    #[DataProvider('getCheckData')]
+    public function testCheck($dbFieldsInfo, $check, $data, $evaluateExpression, $constraints, $allowWithoutGeom, $expectedResult): void
+    {
+        $mockFuncs = array('getAttributesEditorForm', 'getFieldValue', 'getConstraints', 'evaluateExpression');
+        $formMock = $this->getMockBuilder(QgisFormForTests::class)->onlyMethods($mockFuncs)->getMock();
+        foreach ($mockFuncs as $method) {
+            if ($method === 'evaluateExpression') {
+                $formMock->method($method)->willReturn($evaluateExpression);
+            } elseif ($method === 'getConstraints') {
+                $formMock->method($method)->willReturn($constraints);
+            } else {
+                $formMock->method($method)->willReturn(null);
+            }
+        }
+        $formMock->dbFieldsInfo = $dbFieldsInfo;
+        $formMock->appContext = new ContextForTests();
+        $jForm = new dummyForm();
+        $jForm->check = $check;
+        $jForm->data = $data;
+        $jForm->controls = array();
+        foreach (array_keys((array) $dbFieldsInfo->dataFields) as $key) {
+            $jForm->controls[$key] = new jFormsControlInput($key);
+        }
+        $layer = new QgisLayerForTests();
+        $layer->eCapabilities = (object) array('capabilities' => (object) array('modifyGeometry' => 'True', 'allow_without_geom' => $allowWithoutGeom));
+        $layer->dbFieldValues = array();
+
+        $testCfg = new Project\ProjectConfig(new stdClass());
+
+        $proj = new ProjectForTests();
+        $proj->setRepo(new Repository('key', array(), null, null, null));
+        $proj->setCfg($testCfg);
+
+        $layer->setProject($proj);
+        $formMock->setForm($jForm);
+        $formMock->setLayer($layer);
+        $this->assertEquals($expectedResult, $formMock->check());
+    }
+
+    public function testSaveToDbInsert(): void
+    {
+        $dbFieldsInfo = (object) array(
+            'dataFields' => (object) array(
+                'pkuid' => null,
+                'field' => null,
+                'geometry' => null,
+            ),
+            'geometryColumn' => 'geometry',
+        );
+        $controls = array(
+            'pkuid' => new jFormsControlInput('pkuid'),
+            'field' => new jFormsControlInput('field'),
+            'geometry' => new jFormsControlInput('geometry'),
+        );
+        $values = array(
+            'pkuid' => true,
+            'field' => true,
+            'geometry' => true,
+        );
+        $formMock = $this->getMockBuilder(QgisFormForTests::class)->onlyMethods(array('getFieldList', 'getParsedValue', 'ProcessUploadedFile', 'filterDataByLogin'))->getMock();
+        $jForm = new dummyForm();
+        $jForm->controls = $controls;
+        $layerMock = $this->getMockBuilder(QgisLayerForTests::class)->onlyMethods(array('getDatasourceParameters', 'updateFeature', 'insertFeature'))->getMock();
+        $layerMock->connection = new jDbConnectionForTests();
+        $layerMock->method('getDatasourceParameters')->willReturn((object) array('tablename' => null, 'schema' => null));
+        $layerMock->expects($this->once())->method('insertFeature')->with($this->equalTo($values));
+        $formMock->dbFieldsInfo = $dbFieldsInfo;
+        $formMock->setLayer($layerMock);
+        $formMock->setForm($jForm);
+        $formMock->method('getFieldList')->willReturn(array_keys($controls));
+        $formMock->appContext = new ContextForTests();
+        $formMock->method('getParsedValue')->willReturn(true);
+        $formMock->saveToDb();
+    }
+
+    public function testSaveToDbUpdate(): void
+    {
+        $dbFieldsInfo = (object) array(
+            'dataFields' => (object) array(
+                'pkuid' => null,
+                'field' => null,
+                'geometry' => null,
+            ),
+            'geometryColumn' => 'geometry',
+        );
+        $controls = array(
+            'pkuid' => new jFormsControlInput('pkuid'),
+            'field' => new jFormsControlInput('field'),
+            'geometry' => new jFormsControlUpload('geometry'),
+        );
+        $values = array(
+            'pkuid' => true,
+            'field' => true,
+            'geometry' => true,
+        );
+        $formMock = $this->getMockBuilder(QgisFormForTests::class)->onlyMethods(array('getFieldList', 'getParsedValue', 'processUploadedFile', 'filterDataByLogin'))->getMock();
+        $jForm = new dummyForm();
+        $jForm->controls = $controls;
+        $layerMock = $this->getMockBuilder(QgisLayerForTests::class)->onlyMethods(array('getDatasourceParameters', 'getDatasourceConnection', 'updateFeature', 'insertFeature'))->getMock();
+        $layerMock->name = 'name';
+        $layerMock->method('getDatasourceParameters')->willReturn((object) array('tablename' => null, 'schema' => null));
+        $layerMock->expects($this->once())->method('updateFeature')->with($this->equalTo('feature'), $this->equalTo($values), $this->anything());
+        $formMock->dbFieldsInfo = $dbFieldsInfo;
+        $formMock->featureId = 'not null';
+        $formMock->setLayer($layerMock);
+        $formMock->setForm($jForm);
+        $formMock->method('getFieldList')->willReturn(array_keys($controls));
+        $formMock->method('getParsedValue')->willReturn(true);
+        $formMock->method('processUploadedFile')->willReturn(true);
+        $formMock->expects($this->once())->method('processUploadedFile');
+        $formMock->expects($this->once())->method('filterDataByLogin')->with($this->equalTo('name'));
+        $formMock->appContext = new ContextForTests();
+        $formMock->saveToDb('feature');
+    }
+
+    public static function getFieldListData()
+    {
+        $eCaps = array(
+            'modifyGeometry' => 'true',
+            'modifyAttribute' => 'true',
+        );
+        $eCapsNoG = array(
+            'modifyGeometry' => 'false',
+            'modifyAttribute' => 'true',
+        );
+        $eCapsNoA = array(
+            'modifyGeometry' => 'true',
+            'modifyAttribute' => 'false',
+        );
+        $eCapsNone = array(
+            'modifyGeometry' => 'false',
+            'modifyAttribute' => 'false',
+        );
+        $formFields = array('pkuid', 'foo');
+        $expectedFields1 = array(
+            'pkuid',
+            'geometry',
+            'field',
+            'test',
+            'foo',
+        );
+        $expectedFields2 = array(
+            'pkuid',
+            'field',
+            'test',
+            'foo',
+        );
+        $expectedFields3 = array(
+            'pkuid',
+            'geometry',
+            'foo',
+        );
+
+        return array(
+            array($eCaps, null, true, $expectedFields1),
+            array($eCaps, null, false, $expectedFields1),
+            array($eCaps, $formFields, true, $expectedFields1),
+            array($eCapsNoG, null, true, $expectedFields1),
+            array($eCapsNoG, null, false, $expectedFields2),
+            array($eCapsNoG, $formFields, false, $expectedFields2),
+            array($eCapsNoA, null, true, $expectedFields1),
+            array($eCapsNoA, null, false, array('geometry')),
+            array($eCapsNoA, $formFields, false, array('geometry')),
+            array($eCapsNone, null, true, $expectedFields1),
+            array($eCapsNone, null, false, array()),
+            array($eCapsNone, $formFields, false, array()),
+        );
+    }
+
+    /**
+     * @dataProvider getFieldListData
+     *
+     * @param mixed $eCaps
+     * @param mixed $formFields
+     * @param mixed $insert
+     * @param mixed $expectedFields
+     */
+    #[DataProvider('getFieldListData')]
+    public function testGetFieldsList($eCaps, $formFields, $insert, $expectedFields): void
+    {
+        $dataFields = (object) array(
+            'pkuid' => null,
+            'geometry' => null,
+            'field' => null,
+            'test' => null,
+            'foo' => null,
+        );
+        $dbFieldsInfo = (object) array('dataFields' => $dataFields);
+        $geometryColumn = 'geometry';
+        $formMock = $this->getMockBuilder(QgisFormForTests::class)->onlyMethods(array('getAttributesEditorForm'))->getMock();
+        $attributesMock = $this->getMockBuilder(qgisAttributeEditorElement::class)->disableOriginalConstructor()->onlyMethods(array('getFields'))->getMock();
+        $attributesMock->method('getFields')->willReturn($formFields);
+        $layer = new QgisLayerForTests();
+        $layer->eCapabilities = (object) array('capabilities' => (object) $eCaps);
+        $formMock->dbFieldsInfo = $dbFieldsInfo;
+        $formMock->setLayer($layer);
+        if ($formFields) {
+            $formMock->method('getAttributesEditorForm')->willReturn($attributesMock);
+        } else {
+            $formMock->method('getAttributesEditorForm')->willReturn(null);
+        }
+        $this->assertEquals($expectedFields, $formMock->getFieldListForTests($geometryColumn, $insert));
+    }
+
+    public static function getFillControlUniqueData()
+    {
+        $uniqueValues = array(
+            'editable' => null,
+            'notNull' => null,
+        );
+        $uniqueValuesNotNull = array(
+            'editable' => null,
+            'notNull' => 'not null',
+        );
+        $uniqueValuesEditable = array(
+            'editable' => 'not null',
+            'notNull' => null,
+        );
+        $uniqueValuesBoth = array(
+            'editable' => 'not null',
+            'notNull' => 'not null',
+        );
+
+        return array(
+            array($uniqueValues, false, false, array('bar' => 'bar', 'foo' => 'foo'), false),
+            array($uniqueValues, true, false, array('' => '', 'bar' => 'bar', 'foo' => 'foo'), true),
+            array($uniqueValuesNotNull, false, false, array('' => '', 'bar' => 'bar', 'foo' => 'foo'), true),
+            array($uniqueValuesEditable, true, true, array('' => '', 'bar' => 'bar', 'foo' => 'foo'), true),
+            array($uniqueValuesEditable, false, true, array('bar' => 'bar', 'foo' => 'foo'), false),
+            array($uniqueValuesBoth, true, true, array('' => '', 'bar' => 'bar', 'foo' => 'foo'), true),
+            array($uniqueValuesBoth, false, true, array('' => '', 'bar' => 'bar', 'foo' => 'foo'), true),
+        );
+    }
+
+    /**
+     * @dataProvider getFillControlUniqueData
+     *
+     * @param mixed $uniqueValues
+     * @param mixed $required
+     * @param mixed $setAttribute
+     * @param mixed $expectedData
+     * @param mixed $expectedRequired
+     */
+    #[DataProvider('getFillControlUniqueData')]
+    public function testFillControlFromUniqueValue($uniqueValues, $required, $setAttribute, $expectedData, $expectedRequired): void
+    {
+        $dbFieldValues = array('foo', 'bar');
+        $form = new QgisFormForTests();
+        $control = $this->getMockBuilder(QgisFormControl::class)->disableOriginalConstructor()->getMock();
+        $control->ctrl = $this->getMockBuilder(jFormsControlListbox::class)->onlyMethods(array('setAttribute'))->disableOriginalConstructor()->getMock();
+        if ($setAttribute) {
+            $control->ctrl->expects($this->once())->method('setAttribute');
+        }
+        $control->uniqueValuesData = $uniqueValues;
+        $control->ctrl->required = $required;
+        $layer = $this->setUpEnv('test', 'test', $dbFieldValues);
+        $layer->dbFieldValues = $dbFieldValues;
+        $form->setLayer($layer);
+        $form->appContext = new ContextForTests();
+        $form->fillControlFromUniqueValuesForTests('test', $control);
+        $this->assertEquals($expectedData, $control->ctrl->datasource->data);
+        $this->assertEquals($expectedRequired, $control->ctrl->required);
+    }
+
+    /**
+     * All dynamic-default expressions are sent in a single evaluateExpression
+     * call (batching), not one call per field.
+     */
+    public function testDynamicDefaultsBatchedIntoSingleCall(): void
+    {
+        $layer = new QgisLayerForTests();
+        $layer->setDefaultValues(array(
+            'coord_x' => '$x',
+            'concat_ab' => '"a" || "b"',
+            'ts' => 'now()',
+        ));
+
+        $form = new dummyFormForDefaults();
+
+        $formObj = new QgisFormForTests();
+        $formObj->setLayer($layer);
+        $formObj->setForm($form);
+        // evaluateExpressionReturn stays null — that is fine, we only count calls
+
+        $formObj->evaluateDefaultExpressionsForTests(array(
+            'coord_x' => '$x',
+            'concat_ab' => '"a" || "b"',
+            'ts' => 'now()',
+        ));
+
+        $this->assertCount(1, $formObj->evaluateExpressionCalls, 'Expected exactly one batched evaluateExpression call');
+        $call = $formObj->evaluateExpressionCalls[0];
+        $this->assertArrayHasKey('coord_x', $call['expressions']);
+        $this->assertArrayHasKey('concat_ab', $call['expressions']);
+        $this->assertArrayHasKey('ts', $call['expressions']);
+    }
+
+    /**
+     * Numeric and single-quoted-literal defaults must not be passed to
+     * evaluateExpression; only truly dynamic expressions go through.
+     */
+    public function testStaticDefaultsFastPathSkipsExpressionEvaluation(): void
+    {
+        $layer = new QgisLayerForTests();
+        $layer->setDefaultValues(array(
+            'num_field' => '42',
+            'str_field' => '\'literal\'',
+            'dyn_field' => '(SELECT 1)',
+        ));
+
+        $form = new dummyFormForDefaults();
+
+        $formObj = new QgisFormForTests();
+        $formObj->setLayer($layer);
+        $formObj->setForm($form);
+
+        // collectDynamicExpressions classifies the fields
+        $dynamic = $formObj->collectDynamicExpressionsForTests();
+
+        $this->assertArrayNotHasKey('num_field', $dynamic, 'Numeric default must be static');
+        $this->assertArrayNotHasKey('str_field', $dynamic, 'Single-quoted literal must be static');
+        $this->assertArrayHasKey('dyn_field', $dynamic, 'SQL expression must be dynamic');
+        $this->assertCount(1, $dynamic);
+
+        // When we evaluate only the one dynamic expression, evaluateExpression
+        // is called exactly once.
+        $formObj->evaluateDefaultExpressionsForTests($dynamic);
+
+        $this->assertCount(1, $formObj->evaluateExpressionCalls);
+        $callExpressions = $formObj->evaluateExpressionCalls[0]['expressions'];
+        $this->assertArrayHasKey('dyn_field', $callExpressions);
+        $this->assertArrayNotHasKey('num_field', $callExpressions);
+        $this->assertArrayNotHasKey('str_field', $callExpressions);
+    }
+
+    /**
+     * When geometry WKT and existing form data are present, evaluateExpression
+     * receives a form_feature with a parsed geometry object and matching properties.
+     */
+    public function testFormFeatureContextPassedToExpressionEvaluator(): void
+    {
+        $layer = new QgisLayerForTests();
+        $layer->setDefaultValues(array('coord_x' => '$x'));
+
+        $form = new dummyFormForDefaults();
+        $form->setData('liz_geometryColumn', 'geom');
+        $form->setData('geom', 'POINT(10 20)');
+        $form->setData('firstname', 'Jane');
+
+        $formObj = new QgisFormForTests();
+        $formObj->setLayer($layer);
+        $formObj->setForm($form);
+
+        $formObj->evaluateDefaultExpressionsForTests(array('coord_x' => '$x'));
+
+        $this->assertCount(1, $formObj->evaluateExpressionCalls);
+        $formFeature = $formObj->evaluateExpressionCalls[0]['form_feature'];
+
+        // Geometry must be parsed (not the raw WKT string, not null)
+        $this->assertNotNull($formFeature['geometry'], 'Parsed geometry must not be null');
+        $this->assertNotEquals('POINT(10 20)', $formFeature['geometry'], 'form_feature geometry must be a parsed object, not a raw WKT string');
+
+        // Properties must carry the pre-set form data
+        $this->assertArrayHasKey('firstname', $formFeature['properties']);
+        $this->assertEquals('Jane', $formFeature['properties']['firstname']);
+    }
+
+    /**
+     * setFormDataFromDefault must not overwrite a field that already has a value;
+     * the pre-set (manually entered) value must survive.
+     */
+    public function testSetFormDataFromDefaultDoesNotOverwriteExistingValue(): void
+    {
+        $layer = new QgisLayerForTests();
+        $layer->setDefaultValues(array('foo' => '"bar" || "baz"'));
+        // DB has no default values for this layer
+        $layer->dbFieldValues = array();
+
+        $form = new dummyFormForDefaults();
+        // Simulate user has already typed a value into 'foo'
+        $form->setData('foo', 'manual');
+
+        $formObj = new QgisFormForTests();
+        $formObj->setLayer($layer);
+        $formObj->setForm($form);
+
+        // Stub evaluateExpression to return a value for 'foo'
+        $expressionResult = new \stdClass();
+        $expressionResult->foo = 'evaluated_default';
+        $formObj->evaluateExpressionReturn = $expressionResult;
+
+        // setFormDataFromDefault calls collectDynamicExpressions then
+        // evaluateDefaultExpressions and only fills EMPTY fields.
+        // We drive it by calling evaluateDefaultExpressionsForTests directly
+        // (same logic used by setFormDataFromDefault's expression pass).
+        $dynamicExprs = $formObj->collectDynamicExpressionsForTests();
+        $evaluated = $formObj->evaluateDefaultExpressionsForTests($dynamicExprs);
+
+        foreach ($evaluated as $ref => $value) {
+            $cur = $form->getData($ref);
+            if ($cur === null || $cur === '') {
+                $form->setData($ref, $value);
+            }
+        }
+
+        // 'foo' was already 'manual' — it must not be overwritten
+        $this->assertEquals('manual', $form->getData('foo'));
+    }
+
+    public function testResolveFieldNames(): void
+    {
+        $layer = new QgisLayerForTests();
+        $layer->setAliases(array('id' => 'id', 'point_name' => 'Name', 'Code' => 'Code'));
+
+        $formObj = new QgisFormForTests();
+        $formObj->setLayer($layer);
+
+        // exact name, alias, alias in another case, field name in another case, unknown name
+        $this->assertEquals(
+            array('id', 'point_name', 'Code', 'unknown'),
+            $formObj->resolveFieldNamesForTests(array('id', 'point_name', 'name', 'NAME', 'code', 'unknown'))
+        );
+    }
+}

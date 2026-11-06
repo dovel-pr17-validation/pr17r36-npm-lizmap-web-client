@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<suburls xmlns="http://jelix.org/ns/suburls/1.0">
+    <url pathinfo="/" action="default:index"/>
+    <url pathinfo="/datatables"  controller="datatables"/>
+    <url pathinfo="/edition"     controller="edition"/>
+    <url pathinfo="/features"    controller="features"/>
+    <url pathinfo="/geobookmark" controller="geobookmark"/>
+    <url pathinfo="/osm"         controller="osm"/>
+    <url pathinfo="/permalink"   controller="permalink"/>
+    <url pathinfo="/project"     controller="project"/>
+    <url pathinfo="/repository"  controller="repository"/>
+    <url pathinfo="/search"      controller="search"/>
+    <url pathinfo="/searchFts"   controller="searchFts"/>
+    <url pathinfo="/wmts"        controller="wmts"/>
+
+    <url pathinfo="/service/getProjectConfig" action="service:getProjectConfig" optionalTrailingSlash="true"/>
+    <url pathinfo="/service/getKeyValueConfig" action="service:getKeyValueConfig" optionalTrailingSlash="true"/>
+    <!-- url for WMS/WMTS/etc service compatible with specification, to not have repository and project query parameters -->
+    <url pathinfo="/service/:repository/:project" action="service:index" optionalTrailingSlash="true" />
+
+    <!-- declaration to keep compatibility with the old url of service:index -->
+    <url pathinfo="/service" action="service:oldindex" optionalTrailingSlash="true"/>
+</suburls>

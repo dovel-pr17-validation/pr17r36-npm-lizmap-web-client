@@ -1,0 +1,273 @@
+// @ts-check
+import { dirname } from 'path';
+import * as fs from 'fs/promises'
+import { existsSync } from 'node:fs';
+import { test, expect } from '@playwright/test';
+import {ProjectPage} from "./pages/project";
+import { PrintPage } from "./pages/printpage";
+import { expect as requestExpect } from './fixtures/expect-request.js';
+import { expect as responseExpect } from './fixtures/expect-response.js';
+import { playwrightTestFile} from "./globals";
+
+// To update OSM and GeoPF tiles in the mock directory
+// IMPORTANT, this must not be set to `true` while committing, on GitHub. Set to `false`.
+const UPDATE_MOCK_FILES = false;
+
+test.describe('Axis Orientation',
+    {
+        tag: ['@readonly'],
+    },() => {
+
+        test('Axis Orientation NEU for EPSG:3044', async ({ page }) => {
+            const project = new ProjectPage(page, 'axis_orientation_neu_3044');
+            await project.open();
+            await expect(await project.getDebugBarWarning()).toHaveCount(0);
+            expect(await project.hasDebugBarWarnings(), (await project.getDebugBarWarningMessage())).toBe(false);
+
+            // Get blank buffer
+            let buffer = await page.screenshot({clip:{x:950/2-380/2, y:600/2-380/2, width:380, height:380}});
+            const blankByteLength = buffer.byteLength;
+            expect(blankByteLength).toBeGreaterThan(1000); // 1286
+            expect(blankByteLength).toBeLessThan(1500) // 1286
+
+            const getMapPromise = project.waitForGetMapRequest();
+            await page.getByLabel('Bundesländer').check();
+            const getMapRequest = await getMapPromise;
+            const expectedParameters = {
+                'SERVICE': 'WMS',
+                'VERSION': '1.3.0',
+                'REQUEST': 'GetMap',
+                'FORMAT': 'image/png',
+                'TRANSPARENT': /\b(\w*^true$\w*)\b/gmi,
+                'LAYERS': 'Bundeslander',
+                'CRS': 'EPSG:3044',
+                'STYLES': 'default',
+                'WIDTH': '958',
+                'HEIGHT': '633',
+                'BBOX': /5276843.28\d+,-14455.54\d+,6114251.21\d+,1252901.15\d+/,
+            }
+            requestExpect(getMapRequest).toContainParametersInUrl(expectedParameters);
+
+            const getMapResponse = await getMapRequest.response();
+            responseExpect(getMapResponse).toBeImagePng();
+            // image size greater than transparent
+            const contentLength = await getMapResponse?.headerValue('Content-Length');
+            expect(parseInt(contentLength ? contentLength : '0')).toBeGreaterThan(5552);
+
+            // Wait for transition
+            await page.waitForTimeout(1000);
+
+            buffer = await page.screenshot({clip:{x:950/2-380/2, y:600/2-380/2, width:380, height:380}});
+            const bundeslanderByteLength = buffer.byteLength;
+            await expect(bundeslanderByteLength).toBeGreaterThan(blankByteLength);
+
+            // Catch GetTile request
+            /** @type {string[]} GetTiles - Array of tiles url string */
+            let GetTiles = [];
+            await page.route('https://tile.openstreetmap.org/*/*/*.png', async (route) => {
+                const request = route.request();
+                GetTiles.push(request.url());
+
+                // Build path file in mock directory
+                const pathFile = playwrightTestFile('mock', 'axis_orientation', 'osm' , 'tiles' + (new URL(request.url()).pathname));
+                if (UPDATE_MOCK_FILES && GetTiles.length <= 6) {
+                    // Save file in mock directory for 6 tiles maximum
+                    const response = await route.fetch();
+                    await fs.mkdir(dirname(pathFile), { recursive: true });
+                    await fs.writeFile(pathFile, new Uint8Array(await response.body()));
+                } else if (existsSync(pathFile)) {
+                    // fulfill route's request with mock file
+                    await route.fulfill({
+                        path: pathFile
+                    })
+                } else {
+                    // fulfill route's request with default transparent tile
+                    await route.fulfill({
+                        path: playwrightTestFile('mock', 'transparent_tile.png')
+                    })
+                }
+            });
+
+            await project.baseLayerSelect.selectOption('OpenStreetMap');
+            while (GetTiles.length < 6) {
+                await page.waitForTimeout(100);
+            }
+
+            await expect(GetTiles.length).toBeGreaterThanOrEqual(6);
+            await expect(GetTiles[0]).toContain('6/33/20.png')
+            await expect(GetTiles[1]).toContain('6/33/21.png')
+            await expect(GetTiles[2]).toContain('6/34/20.png')
+            await expect(GetTiles[3]).toContain('6/34/21.png')
+            await expect(GetTiles[4]).toContain('6/33/22.png')
+            await expect(GetTiles[5]).toContain('6/34/22.png')
+
+            // Remove listen to osm tiles
+            await page.unroute('https://tile.openstreetmap.org/*/*/*.png');
+
+            // Wait for transition
+            await page.waitForTimeout(1000);
+
+            buffer = await page.screenshot({clip:{x:950/2-380/2, y:600/2-380/2, width:380, height:380}});
+            const osmByteLength = buffer.byteLength;
+            await expect(osmByteLength).toBeGreaterThan(blankByteLength);
+            await expect(osmByteLength).toBeGreaterThan(bundeslanderByteLength);
+        });
+
+        test('Axis Orientation NEU for EPSG:3844', async ({ page }) => {
+            const project = new ProjectPage(page, 'axis_orientation_neu_3844');
+            await project.open();
+
+            // Get blank buffer
+            let buffer = await page.screenshot({clip:{x:950/2-380/2, y:600/2-380/2, width:380, height:380}});
+            const blankByteLength = buffer.byteLength;
+            expect(blankByteLength).toBeGreaterThan(1000); // 1286
+            expect(blankByteLength).toBeLessThan(1500) // 1286
+
+            const getMapPromise = project.waitForGetMapRequest();
+            await page.getByLabel('județ').check();
+            const getMapRequest = await getMapPromise;
+            const expectedParameters = {
+                'SERVICE': 'WMS',
+                'VERSION': '1.3.0',
+                'REQUEST': 'GetMap',
+                'FORMAT': 'image/png',
+                'TRANSPARENT': /\b(\w*^true$\w*)\b/gmi,
+                'LAYERS': 'judet',
+                'CRS': 'EPSG:3844',
+                'STYLES': 'default',
+                'WIDTH': '958',
+                'HEIGHT': '633',
+                'BBOX': /72126.00\d+,-122200.57\d+,909533.92\d+,1145156.12\d+/,
+            }
+            requestExpect(getMapRequest).toContainParametersInUrl(expectedParameters);
+
+            const getMapResponse = await getMapRequest.response();
+            responseExpect(getMapResponse).toBeImagePng();
+            // image size greater than transparent
+            const contentLength = await getMapResponse?.headerValue('Content-Length');
+            expect(parseInt(contentLength ? contentLength : '0')).toBeGreaterThan(5552);
+            // image size lesser than disorder axis
+            expect(parseInt(contentLength ? contentLength : '0')).toBeLessThan(240115);
+
+            // Wait for transition
+            await page.waitForTimeout(1000);
+
+            buffer = await page.screenshot({clip:{x:950/2-380/2, y:600/2-380/2, width:380, height:380}});
+            const judetByteLength = buffer.byteLength;
+            expect(judetByteLength).toBeGreaterThan(blankByteLength);
+
+            // Catch GetTile request
+            /** @type {string[]} GetTiles - Array of tiles url string */
+            let GetTiles = [];
+            await page.route('https://tile.openstreetmap.org/*/*/*.png', async (route) => {
+                const request = route.request();
+                GetTiles.push(request.url());
+
+                // Build path file in mock directory
+                const pathFile = playwrightTestFile('mock', 'axis_orientation', 'osm', 'tiles' + (new URL(request.url()).pathname));
+                if (UPDATE_MOCK_FILES && GetTiles.length <= 6) {
+                    // Save file in mock directory for 6 tiles maximum
+                    const response = await route.fetch();
+                    await fs.mkdir(dirname(pathFile), { recursive: true });
+                    await fs.writeFile(pathFile, new Uint8Array(await response.body()));
+                } else if (existsSync(pathFile)) {
+                    // fulfill route's request with mock file
+                    await route.fulfill({
+                        path: pathFile
+                    })
+                } else {
+                    // fulfill route's request with default transparent tile
+                    await route.fulfill({
+                        path: playwrightTestFile('mock', 'transparent_tile.png')
+                    })
+                }
+            });
+
+            await project.baseLayerSelect.selectOption('OpenStreetMap');
+            while (GetTiles.length < 6) {
+                await page.waitForTimeout(100);
+            }
+
+            expect(GetTiles.length).toBeGreaterThanOrEqual(6);
+            expect(GetTiles[0]).toContain('6/35/22.png')
+            expect(GetTiles[1]).toContain('6/35/23.png')
+            expect(GetTiles[2]).toContain('6/36/22.png')
+            expect(GetTiles[3]).toContain('6/36/23.png')
+            expect(GetTiles[4]).toContain('6/37/22.png')
+            expect(GetTiles[5]).toContain('6/37/23.png')
+
+            // Remove listen to osm tiles
+            await page.unroute('https://tile.openstreetmap.org/*/*/*.png');
+
+            // Wait for transition
+            await page.waitForTimeout(1000);
+
+            buffer = await page.screenshot({clip:{x:950/2-380/2, y:600/2-380/2, width:380, height:380}});
+            const osmByteLength = buffer.byteLength;
+            expect(osmByteLength).toBeGreaterThan(blankByteLength);
+            expect(osmByteLength).toBeGreaterThan(judetByteLength);
+        });
+
+        test('Axis Orientation NEU for EPSG:31254 (Austria)', async ({ page }) => {
+            const project = new ProjectPage(page, 'austria_31254');
+            await project.open();
+
+            const getMapPromise = project.waitForGetMapRequest();
+            await page.getByLabel('provinces').check();
+            const getMapRequest = await getMapPromise;
+            const getMapExpectedParameters = {
+                'SERVICE': 'WMS',
+                'VERSION': '1.3.0',
+                'REQUEST': 'GetMap',
+                'FORMAT': 'image/png',
+                'TRANSPARENT': /\b(\w*^true$\w*)\b/gmi,
+                'LAYERS': 'provinces',
+                'CRS': 'EPSG:31254',
+                'STYLES': 'défaut',
+                'WIDTH': '958',
+                'HEIGHT': '633',
+                'BBOX': /157457\.\d+,-67046\.\d+,324939\.\d+,186425\.\d+/,
+            }
+            requestExpect(getMapRequest).toContainParametersInUrl(getMapExpectedParameters);
+
+            const getMapResponse = await getMapRequest.response();
+            responseExpect(getMapResponse).toBeImagePng();
+            // image size greater than transparent
+            const contentLength = await getMapResponse?.headerValue('Content-Length');
+            expect(parseInt(contentLength ? contentLength : '0')).toBeGreaterThan(5552);
+
+            // Check Print
+            await project.closeLeftDock();
+            const printPage = new PrintPage(page, 'austria_31254');
+            printPage.openPrintPanel();
+
+            // Wait for print request and launch it
+            const getPrintPromise = printPage.waitForGetPrintRequest();
+
+            // Launch print
+            await printPage.launchPrint();
+
+            const getPrintRequest = await getPrintPromise;
+            // Verify the custom scale value is used in the print request
+            const getPrintExpectedParameters = {
+                'SERVICE': 'WMS',
+                'REQUEST': 'GetPrint',
+                'VERSION': '1.3.0',
+                'FORMAT': 'pdf',
+                'TRANSPARENT': 'true',
+                'CRS': 'EPSG:31254',
+                'DPI': '100',
+                'TEMPLATE': 'A4-paysage',
+                "map1:EXTENT": /147198\.\d+,-66810\.\d+,335198\.\d+,186189\.\d+/,
+                "map1:SCALE": "1000000",
+                "map1:LAYERS": "provinces",
+                "map1:STYLES": "défaut",
+                "map1:OPACITIES": "255",
+                "map0:EXTENT": /-6139\.\d+,-75686\.\d+,593860\.\d+,524313\.\d+/
+            };
+            requestExpect(getPrintRequest).toContainParametersInPostData(getPrintExpectedParameters);
+
+            responseExpect(await getPrintRequest.response()).toBePdf();
+
+        });
+    });

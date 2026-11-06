@@ -1,0 +1,618 @@
+// @ts-check
+import { dirname } from 'path';
+import * as fs from 'fs/promises'
+import { existsSync } from 'node:fs';
+import { test, expect } from '@playwright/test';
+import { ProjectPage } from './pages/project';
+import { expect as responseExpect } from './fixtures/expect-response.js'
+import { playwrightTestFile, digestBuffer } from "./globals";
+
+// To update OSM and GeoPF tiles in the mock directory
+// IMPORTANT, this must not be set to `true` while committing, on GitHub. Set to `false`.
+const UPDATE_MOCK_FILES = false;
+
+test.describe('Geolocation @readonly', () => {
+
+    const locale = 'en-US';
+
+    /** @type {string[]} */
+    let osmTiles = [];
+
+    test.beforeEach(async ({ page }) => {
+        const project = new ProjectPage(page, 'geolocation');
+        project.waitForGetLegendGraphicDuringLoad = false;
+        project.layersInTreeView = 0;
+
+        // Catch all tiles requests from openstreetmap to mock them
+        await page.route('https://tile.openstreetmap.org/*/*/*.png', async (route) => {
+            const request = route.request();
+            osmTiles.push(request.url());
+
+            // Build path file in mock directory
+            const pathFile = playwrightTestFile('mock', 'geolocation', 'osm', 'tiles' + (new URL(request.url()).pathname));
+            if (UPDATE_MOCK_FILES) {
+                // Save file in mock directory
+                const response = await route.fetch();
+                await fs.mkdir(dirname(pathFile), { recursive: true });
+                await fs.writeFile(pathFile, new Uint8Array(await response.body()));
+            } else if (existsSync(pathFile)) {
+                // fulfill route's request with mock file
+                await route.fulfill({
+                    path: pathFile
+                })
+            } else {
+                // fulfill route's request with default transparent tile
+                await route.fulfill({
+                    path: playwrightTestFile('mock', 'transparent_tile.png')
+                })
+            }
+        });
+
+        await project.open();
+    });
+
+    test.afterEach(async ({ page }) => {
+        osmTiles = [];
+        await page.unroute('https://tile.openstreetmap.org/*/*/*.png');
+    });
+
+    test('Geolocation Default UI', async ({ page }) => {
+        //const project = new ProjectPage(page, 'geolocation');
+
+        // Grant geolocation permission and set geolocation
+        page.context().grantPermissions(['geolocation']);
+        page.context().setGeolocation({
+            latitude: 43.6214338643574,
+            longitude: 3.84280215159599,
+            accuracy: 100,
+        });
+
+        // Check scale
+        await expect(page.locator('#overview-bar .ol-scale-text')).toHaveText('1 : ' + (50000000).toLocaleString(locale));
+
+        // Check button to open geolocation
+        const geolocationButton = page.locator('#button-geolocation');
+        await expect(geolocationButton).toBeVisible();
+        await geolocationButton.click();
+
+        // Check dock
+        const geolocationDock = page.locator('#geolocation');
+        await expect(geolocationDock).toBeVisible();
+        await expect(geolocationDock.locator('.title .text')).toHaveText('Geolocation');
+        const geolocationDockButtonBar = geolocationDock.locator('.button-bar');
+        await expect(geolocationDockButtonBar).toBeVisible();
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true })).toHaveCount(1);
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true })).toBeVisible();
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Center', exact: true })).toHaveCount(1);
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Center', exact: true })).toBeVisible();
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Stay centered', exact: true })).toHaveCount(1);
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Stay centered', exact: true })).toBeVisible();
+        await expect(geolocationDockButtonBar.locator('input')).toHaveCount(1);
+        await expect(geolocationDockButtonBar.locator('input')).toBeVisible();
+        await expect(geolocationDockButtonBar.locator('input')).toHaveValue('10');
+        const geolocationDockInfos = geolocationDock.locator('.geolocation-infos');
+        await expect(geolocationDockInfos).toBeVisible();
+        const geolocationDockCoords = geolocationDock.locator('.geolocation-coords');
+        await expect(geolocationDockCoords).toBeVisible();
+        await expect(geolocationDockCoords.locator('div')).toHaveCount(2);
+        await expect(geolocationDockCoords.locator('div').nth(0)).toHaveText('X :');
+        await expect(geolocationDockCoords.locator('div').nth(1)).toHaveText('Y :');
+        const geolocationDockAccuracy = geolocationDock.locator('.geolocation-accuracy');
+        await expect(geolocationDockAccuracy).toBeVisible();
+        await expect(geolocationDockAccuracy).toHaveText('Accuracy (m) :');
+    });
+
+    test('Geolocation start and stop', async ({ page }) => {
+        const project = new ProjectPage(page, 'geolocation');
+        // Screenshot scoped to #newOlMap to avoid interference from sibling UI elements (dock, messages, etc.)
+        const mapLocator = page.locator('#newOlMap');
+
+        // Wait for request and response
+        while (osmTiles.length < 12) {
+            await page.waitForResponse('https://tile.openstreetmap.org/*/*/*.png', { timeout: 10000 });
+        }
+
+        // Grant geolocation permission and set geolocation
+        page.context().grantPermissions(['geolocation']);
+        page.context().setGeolocation({
+            latitude: 43.6214338643574,
+            longitude: 3.84280215159599,
+            accuracy: 1000,
+        });
+
+        const geolocationButton = page.locator('#button-geolocation');
+        await geolocationButton.click();
+
+        // Catch osm tile
+        /** @type {string[]} */
+        osmTiles = [];
+
+        // Start geolocation
+        const geolocationDock = page.locator('#geolocation');
+        const geolocationDockButtonBar = geolocationDock.locator('.button-bar');
+        await geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true }).click();
+
+        // check dock
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true })).toHaveCount(0);
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(1);
+        const geolocationDockCoords = geolocationDock.locator('.geolocation-coords');
+        await expect(geolocationDockCoords.locator('div').nth(0)).toHaveText('X : 3.842802');
+        await expect(geolocationDockCoords.locator('div').nth(1)).toHaveText('Y : 43.621434');
+        const geolocationDockAccuracy = geolocationDock.locator('.geolocation-accuracy');
+        await expect(geolocationDockAccuracy).toHaveText('Accuracy (m) : 1000');
+
+        // Check scale
+        await expect(page.locator('#overview-bar .ol-scale-text')).toHaveText('1 : ' + (25000).toLocaleString(locale));
+
+        // Wait for request and response
+        while (osmTiles.length < 6) {
+            await page.waitForResponse('https://tile.openstreetmap.org/*/*/*.png', { timeout: 10000 });
+        }
+
+        // Check that we catch 6 tiles
+        expect(osmTiles.length).toBeGreaterThanOrEqual(6);
+        // Check that every tiles are from level 19
+        expect(osmTiles[0]).toMatch(/\/15\/\d{5}\/\d{5}\.png/)
+        expect(osmTiles[1]).toMatch(/\/15\/\d{5}\/\d{5}\.png/)
+        expect(osmTiles[2]).toMatch(/\/15\/\d{5}\/\d{5}\.png/)
+        expect(osmTiles[3]).toMatch(/\/15\/\d{5}\/\d{5}\.png/)
+        expect(osmTiles[4]).toMatch(/\/15\/\d{5}\/\d{5}\.png/)
+        expect(osmTiles[5]).toMatch(/\/15\/\d{5}\/\d{5}\.png/)
+
+        // Blank map
+        await project.baseLayerSelect.selectOption('project-background-color');
+        await expect(project.baseLayerSelect).toHaveValue('project-background-color');
+
+        // Wait for OL transition
+        await page.waitForTimeout(500);
+
+        // Hide all elements but #newOlMap and their children
+        await page.$eval("*", el => el.style.visibility = 'hidden');
+        await page.$eval("#newOlMap, #newOlMap *", el => el.style.visibility = 'visible');
+
+        // Get acc 1000 buffer
+        let buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','pos.png'),
+        });
+        const acc1000Hash = await digestBuffer(buffer);
+        const acc1000ByteLength = buffer.byteLength;
+
+        // Restore visibility
+        await page.$eval("*", el => el.style.visibility = '');
+
+        // Stop geolocation
+        await geolocationDockButtonBar.getByRole('button', { name: 'Stop', exact: true }).click();
+
+        // Hide all elements but #newOlMap and their children
+        await page.$eval("*", el => el.style.visibility = 'hidden');
+        await page.$eval("#newOlMap, #newOlMap *", el => el.style.visibility = 'visible');
+
+        // Get blank buffer
+        buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','blank.png'),
+        });
+        const blankHash = await digestBuffer(buffer);
+        expect(blankHash).not.toBe(acc1000Hash);
+        const blankByteLength = buffer.byteLength;
+        expect(blankByteLength).toBeLessThan(acc1000ByteLength);
+
+        // Restore visibility
+        await page.$eval("*", el => el.style.visibility = '');
+
+        // check dock
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true })).toHaveCount(1);
+        await expect(geolocationDockCoords.locator('div').nth(0)).toHaveText('X :');
+        await expect(geolocationDockCoords.locator('div').nth(1)).toHaveText('Y :');
+        await expect(geolocationDockAccuracy).toHaveText('Accuracy (m) :');
+
+        // Change accuracy
+        page.context().setGeolocation({
+            latitude: 43.6214338643574,
+            longitude: 3.84280215159599,
+            accuracy: 100,
+        });
+
+        // Catch osm tile
+        osmTiles = [];
+
+        // Restart on new accuracy
+        await geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true }).click();
+
+        // check dock
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true })).toHaveCount(0);
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(1);
+        await expect(geolocationDockCoords.locator('div').nth(0)).toHaveText('X : 3.842802');
+        await expect(geolocationDockCoords.locator('div').nth(1)).toHaveText('Y : 43.621434');
+        await expect(geolocationDockAccuracy).toHaveText('Accuracy (m) : 100');
+
+        // Check scale
+        await expect(page.locator('#overview-bar .ol-scale-text')).toHaveText('1 : ' + (25000).toLocaleString(locale));
+
+        // Hide all elements but #newOlMap and their children
+        await page.$eval("*", el => el.style.visibility = 'hidden');
+        await page.$eval("#newOlMap, #newOlMap *", el => el.style.visibility = 'visible');
+
+        // Get acc 100 buffer
+        buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','blank.png'),
+        });
+        const acc100Hash = await digestBuffer(buffer);
+        expect(acc100Hash).not.toBe(acc1000Hash);
+        expect(acc100Hash).not.toBe(blankHash);
+        const acc100ByteLength = buffer.byteLength;
+        expect(acc100ByteLength).toBeGreaterThan(blankByteLength);
+        expect(acc100ByteLength).toBeLessThan(acc1000ByteLength);
+
+        // Wait for request and response
+        // while (osmTiles.length < 6) {
+        //     await page.waitForResponse('https://tile.openstreetmap.org/*/*/*.png', { timeout: 10000 });
+        // }
+
+        /*
+        // Check that we catch 6 tiles
+        expect(osmTiles.length).toBeGreaterThanOrEqual(6);
+        // Check that every tiles are from level 19
+        expect(osmTiles[0]).toMatch(/\/19\/\d{6}\/\d{6}\.png/);
+        expect(osmTiles[1]).toMatch(/\/19\/\d{6}\/\d{6}\.png/);
+        expect(osmTiles[2]).toMatch(/\/19\/\d{6}\/\d{6}\.png/);
+        expect(osmTiles[3]).toMatch(/\/19\/\d{6}\/\d{6}\.png/);
+        expect(osmTiles[4]).toMatch(/\/19\/\d{6}\/\d{6}\.png/);
+        expect(osmTiles[5]).toMatch(/\/19\/\d{6}\/\d{6}\.png/);
+        */
+    });
+
+    test('Geolocation error', async ({ page }) => {
+        //const project = new ProjectPage(page, 'geolocation');
+        //const screenshotClip = {x:850/2-380/2, y:700/2-380/2, width:380, height:380};
+
+        // Wait for request and response
+        while (osmTiles.length < 12) {
+            await page.waitForResponse('https://tile.openstreetmap.org/*/*/*.png', { timeout: 10000 });
+        }
+
+        // Grant geolocation permission and set geolocation
+        page.context().grantPermissions(['geolocation']);
+        page.context().setGeolocation({
+            latitude: 43.6214338643574,
+            longitude: 3.84280215159599,
+            accuracy: 1000,
+        });
+
+        const geolocationButton = page.locator('#button-geolocation');
+        await geolocationButton.click();
+
+        // Catch osm tile
+        /** @type {string[]} */
+        osmTiles = [];
+
+        // Start geolocation
+        const geolocationDock = page.locator('#geolocation');
+        const geolocationDockButtonBar = geolocationDock.locator('.button-bar');
+        await geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true }).click();
+
+        // check dock
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true })).toHaveCount(0);
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(1);
+
+        // Check scale
+        await expect(page.locator('#overview-bar .ol-scale-text')).toHaveText('1 : ' + (25000).toLocaleString(locale));
+
+        // Wait for request and response
+        while (osmTiles.length < 6) {
+            await page.waitForResponse('https://tile.openstreetmap.org/*/*/*.png', { timeout: 10000 });
+        }
+
+        // Check that we catch 6 tiles
+        expect(osmTiles.length).toBeGreaterThanOrEqual(6);
+
+        // Geolocation error
+        page.context().setGeolocation(null);
+
+        // Check messgae
+        await expect(page.locator("#message")).toBeVisible();
+        await expect(page.locator("#message > div")).toHaveClass(/alert-danger/);
+
+        // check dock
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
+        await expect(geolocationDockButtonBar.getByRole('button', { name: 'Start', exact: true })).toHaveCount(1);
+    });
+});
+
+test.describe('Geolocation heading @readonly', () => {
+
+    // const locale = 'en-US';
+
+    /** @type {string[]} */
+    let osmTiles = [];
+
+    test.beforeEach(async ({ page }) => {
+        const project = new ProjectPage(page, 'geolocation');
+        project.waitForGetLegendGraphicDuringLoad = false;
+        project.layersInTreeView = 0;
+
+        // Catch all tiles requests from openstreetmap to mock them
+        await page.route('https://tile.openstreetmap.org/*/*/*.png', async (route) => {
+            const request = route.request();
+            osmTiles.push(request.url());
+
+            // Build path file in mock directory
+            const pathFile = playwrightTestFile('mock', 'geolocation', 'osm', 'tiles' + (new URL(request.url()).pathname));
+            if (UPDATE_MOCK_FILES) {
+                // Save file in mock directory
+                const response = await route.fetch();
+                await fs.mkdir(dirname(pathFile), { recursive: true });
+                await fs.writeFile(pathFile, new Uint8Array(await response.body()));
+            } else if (existsSync(pathFile)) {
+                // fulfill route's request with mock file
+                await route.fulfill({
+                    path: pathFile
+                })
+            } else {
+                // fulfill route's request with default transparent tile
+                await route.fulfill({
+                    path: playwrightTestFile('mock', 'transparent_tile.png')
+                })
+            }
+        });
+
+        await page.route('**/service/getProjectConfig*', async route => {
+            const response = await route.fetch();
+            const json = await response.json();
+            json.options['geolocationDirection'] = true;
+            await route.fulfill({ response, json });
+        });
+
+        await project.open();
+    });
+
+    test.afterEach(async ({ page }) => {
+        osmTiles = [];
+        await page.unroute('https://tile.openstreetmap.org/*/*/*.png');
+        await page.unroute('**/service/getProjectConfig*');
+    });
+
+    test('Geolocation start and stop', async ({ page }) => {
+        const project = new ProjectPage(page, 'geolocation');
+        // Screenshot scoped to #newOlMap to avoid interference from sibling UI elements (dock, messages, etc.)
+        const mapLocator = page.locator('#newOlMap');
+
+        // Wait for request and response
+        while (osmTiles.length < 12) {
+            await page.waitForResponse('https://tile.openstreetmap.org/*/*/*.png', { timeout: 10000 });
+        }
+
+        const geolocationButton = page.locator('#button-geolocation');
+        await geolocationButton.click();
+
+        osmTiles = [];
+
+        const getMediaPromise = project.waitForGetMediaRequest();
+        await page.evaluate(`
+            lizMap.mainLizmap.utils.fetchJSON(
+                lizUrls.media+'?repository='+lizUrls.params.repository+'&project='+lizUrls.params.project+'&path=media/geolocation-orientation.json'
+            ).then((data) => {
+                const position = data.data[0];
+                const coords = position.coords;
+                lizMap.mainLizmap.geolocation._geolocation.set('accuracy', coords.accuracy);
+                lizMap.mainLizmap.geolocation._geolocation.set('heading', (coords.heading * Math.PI * 2) / 360);
+                const transform = lizMap.ol.proj.getTransform('EPSG:4326', 'EPSG:3857');
+                const projectedPosition = transform(
+                    [coords.longitude, coords.latitude]
+                );
+                lizMap.mainLizmap.geolocation._geolocation.set('position', projectedPosition);
+                lizMap.mainLizmap.geolocation._geolocation.set(
+                    'accuracyGeometry',
+                    new lizMap.ol.geom.Circle(projectedPosition, coords.accuracy),
+                );
+                lizMap.mainLizmap.geolocation._geolocation.set('speed', coords.speed);
+                lizMap.mainLizmap.geolocation._geolocation.changed();
+                // Override modules/Geolocation.js isTracking
+                Object.defineProperty(lizMap.mainLizmap.geolocation, 'isTracking', {get: () => {return true}, set: () => {return false}});
+                // Dispatch event to update UI
+                lizMap.mainEventDispatcher.dispatch('geolocation.isTracking');
+            });
+        `);
+        const getMediaRequest = await getMediaPromise;
+        responseExpect(await getMediaRequest.response()).toBeJson();
+
+        // Wait for OL transition
+        await page.waitForTimeout(500);
+        // Geolocation is displayed with direction
+
+        // Hide all elements but #newOlMap and their children
+        await page.$eval("*", el => el.style.visibility = 'hidden');
+        await page.$eval("#newOlMap, #newOlMap *", el => el.style.visibility = 'visible');
+
+        // Get unrotate map screenshot
+        let buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','heading-unrotate.png'),
+        });
+        const unrotateByteLength = buffer.byteLength;
+        const unrotateHash = await digestBuffer(buffer);
+
+        // Restore visibility
+        await page.$eval("*", el => el.style.visibility = '');
+
+        // Bind geolocation to rotate the map
+        const geolocationDock = page.locator('#geolocation');
+        const geolocationDockButtonBar = geolocationDock.locator('.button-bar');
+        await geolocationDockButtonBar.locator('.bind-btn').click();
+
+        // Check UI
+        await expect(geolocationDockButtonBar.locator('.bind-btn')).toContainClass('active');
+        await expect(geolocationDockButtonBar.locator('.bind-control')).toHaveValue('1');
+        await expect(geolocationDockButtonBar.locator('.btn-rotate-map')).toContainClass('active');
+
+        // Wait for OL transition
+        await page.waitForTimeout(500);
+
+        // Hide all elements but #newOlMap and their children
+        await page.$eval("*", el => el.style.visibility = 'hidden');
+        await page.$eval("#newOlMap, #newOlMap *", el => el.style.visibility = 'visible');
+
+        // Get rotate map screenshot
+        buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','pos.png'),
+        });
+        const rotateByteLength = buffer.byteLength;
+        expect(rotateByteLength).not.toBe(unrotateByteLength);
+        const rotateHash = await digestBuffer(buffer);
+        expect(rotateHash).not.toBe(unrotateHash);
+
+        // Restore visibility
+        await page.$eval("*", el => el.style.visibility = '');
+
+        // Unbind geolocation, back to unrotate map
+        await geolocationDockButtonBar.locator('.bind-btn').click();
+
+        // Wait for OL transition
+        await page.waitForTimeout(500);
+
+        // Hide all elements but #newOlMap and their children
+        await page.$eval("*", el => el.style.visibility = 'hidden');
+        await page.$eval("#newOlMap, #newOlMap *", el => el.style.visibility = 'visible');
+
+        // Get unrotate map screenshot
+        buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','heading-back-unrotate.png'),
+        });
+        const backUnrotateByteLength = buffer.byteLength;
+        expect(backUnrotateByteLength).not.toBe(rotateByteLength);
+        expect(backUnrotateByteLength).toBe(unrotateByteLength);
+        const backUnrotateHash = await digestBuffer(buffer);
+        expect(backUnrotateHash).not.toBe(rotateHash);
+        expect(backUnrotateHash).toBe(unrotateHash);
+    });
+
+
+    test('Geolocation move', async ({ page }) => {
+        const project = new ProjectPage(page, 'geolocation');
+        // Screenshot scoped to #newOlMap to avoid interference from sibling UI elements (dock, messages, etc.)
+        const mapLocator = page.locator('#newOlMap');
+
+        // Wait for request and response
+        while (osmTiles.length < 12) {
+            await page.waitForResponse('https://tile.openstreetmap.org/*/*/*.png', { timeout: 10000 });
+        }
+
+        const geolocationButton = page.locator('#button-geolocation');
+        await geolocationButton.click();
+
+        osmTiles = [];
+
+        const getMediaPromise = project.waitForGetMediaRequest();
+        await page.evaluate(`
+            lizMap.mainLizmap.utils.fetchJSON(
+                lizUrls.media+'?repository='+lizUrls.params.repository+'&project='+lizUrls.params.project+'&path=media/geolocation-orientation.json'
+            ).then((data) => {
+                const move = (position) => {
+                    const coords = position.coords;
+                    lizMap.mainLizmap.geolocation._geolocation.set('accuracy', coords.accuracy);
+                    lizMap.mainLizmap.geolocation._geolocation.set('heading', (coords.heading * Math.PI * 2) / 360);
+                    const transform = lizMap.ol.proj.getTransform('EPSG:4326', 'EPSG:3857');
+                    const projectedPosition = transform(
+                        [coords.longitude, coords.latitude]
+                    );
+                    lizMap.mainLizmap.geolocation._geolocation.set('position', projectedPosition);
+                    lizMap.mainLizmap.geolocation._geolocation.set(
+                        'accuracyGeometry',
+                        new lizMap.ol.geom.Circle(projectedPosition, coords.accuracy),
+                    );
+                    lizMap.mainLizmap.geolocation._geolocation.set('speed', coords.speed);
+                    lizMap.mainLizmap.geolocation._geolocation.changed();
+                }
+                const position = data.data[0];
+                move(position);
+
+                // Override modules/Geolocation.js isTracking
+                Object.defineProperty(lizMap.mainLizmap.geolocation, 'isTracking', {get: () => {return true}, set: () => {return false}});
+                // Dispatch event to update UI
+                lizMap.mainEventDispatcher.dispatch('geolocation.isTracking');
+
+                const nb_position = data.data.length;
+                let step = 0;
+                const interval = setInterval(() => {
+                    step++;
+                    if (step >= nb_position) {
+                       clearInterval(interval);
+                       return;
+                    }
+                   move(data.data[step]);
+                }, 1000);
+
+            });
+        `);
+        const getMediaRequest = await getMediaPromise;
+        responseExpect(await getMediaRequest.response()).toBeJson();
+        // Wait for OL transition
+        await page.waitForTimeout(500);
+        // Geolocation is displayed with direction
+
+        // Hide all elements but #newOlMap and their children
+        await page.$eval("*", el => el.style.visibility = 'hidden');
+        await page.$eval("#newOlMap, #newOlMap *", el => el.style.visibility = 'visible');
+
+        // Get unrotate map screenshot
+        let buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','heading-unrotate.png'),
+        });
+        const unrotateByteLength = buffer.byteLength;
+        const unrotateHash = await digestBuffer(buffer);
+
+        // Restore visibility
+        await page.$eval("*", el => el.style.visibility = '');
+
+        // Bind geolocation to rotate the map
+        const geolocationDock = page.locator('#geolocation');
+        const geolocationDockButtonBar = geolocationDock.locator('.button-bar');
+        await geolocationDockButtonBar.locator('.bind-btn').click();
+        await geolocationDockButtonBar.locator('.bind-control').fill('1');
+
+        // Wait for OL transition
+        await page.waitForTimeout(500);
+
+        // Hide all elements but #newOlMap and their children
+        await page.$eval("*", el => el.style.visibility = 'hidden');
+        await page.$eval("#newOlMap, #newOlMap *", el => el.style.visibility = 'visible');
+
+        // Get rotate map screenshot
+        buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','pos.png'),
+        });
+        const rotateByteLength = buffer.byteLength;
+        expect(rotateByteLength).not.toBe(unrotateByteLength);
+        const rotateHash = await digestBuffer(buffer);
+        expect(rotateHash).not.toBe(unrotateHash);
+
+        // Wait for moving
+        await page.waitForTimeout(1000);
+
+        // Get move map screenshot
+        buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','move1.png'),
+        });
+        const move1ByteLength = buffer.byteLength;
+        expect(move1ByteLength).not.toBe(rotateByteLength);
+        expect(move1ByteLength).not.toBe(unrotateByteLength);
+        const move1Hash = await digestBuffer(buffer);
+        expect(move1Hash).not.toBe(rotateHash);
+        expect(move1Hash).not.toBe(unrotateHash);
+
+        // Wait for moving
+        await page.waitForTimeout(1000);
+
+        // Get move map screenshot
+        buffer = await mapLocator.screenshot({
+            // path: playwrightTestFile('__screenshots__','geolocation.spec.js','move2.png'),
+        });
+        const move2ByteLength = buffer.byteLength;
+        expect(move2ByteLength).not.toBe(rotateByteLength);
+        expect(move2ByteLength).not.toBe(unrotateByteLength);
+        expect(move2ByteLength).not.toBe(move1ByteLength);
+        const move2Hash = await digestBuffer(buffer);
+        expect(move2Hash).not.toBe(rotateHash);
+        expect(move2Hash).not.toBe(unrotateHash);
+        expect(move2Hash).not.toBe(move1Hash);
+    });
+});

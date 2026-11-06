@@ -1,0 +1,711 @@
+<?php
+
+use Lizmap\Project\Repository;
+use Lizmap\Request\WFSRequest;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * @internal
+ *
+ * @coversNothing
+ */
+class WFSRequestTest extends TestCase
+{
+    public function testParameters(): void
+    {
+        $wfs = new WFSRequest(new ProjectForOGCForTests(), array('request' => 'notGetFeature'), null);
+        $expectedParameters = array(
+            'request' => 'notGetFeature',
+            'map' => null,
+            'Lizmap_User' => '',
+            'Lizmap_User_Groups' => '',
+        );
+        $parameters = $wfs->parameters();
+        $this->assertEquals($expectedParameters, $parameters);
+        $proj = new ProjectForOGCForTests();
+        $proj->setRepo(new Repository('test', array(), '', null, new ContextForTests()));
+        $wfs = new WFSRequest($proj, array('request' => 'notGetFeature'), null);
+        $parameters = $wfs->parameters();
+        $this->assertEquals($expectedParameters, $parameters);
+    }
+
+    public static function getParametersWithFiltersData()
+    {
+        $params1 = array(
+            'request' => 'getfeature',
+            'typename' => 'type,name,for,test',
+        );
+        $filters1 = array(
+            'type' => array(
+                'filter' => 'filter',
+                'filterAttribute' => 'attr',
+            ),
+            'name' => array(
+                'filter' => 'test',
+                'filterAttribute' => 'test attr',
+            ),
+        );
+        $expected1 = array(
+            'request' => 'getfeature',
+            'typename' => 'type,name,for,test',
+            'map' => null,
+            'Lizmap_User' => '',
+            'Lizmap_User_Groups' => '',
+            'exp_filter' => '( filter ) AND ( test )',
+        );
+
+        $params2 = array(
+            'request' => 'getfeature',
+            'typename' => 'type,name,for,test',
+            'exp_filter' => 'testParam',
+            'propertyname' => 'prop  ',
+        );
+        $expected2 = array(
+            'request' => 'getfeature',
+            'typename' => 'type,name,for,test',
+            'map' => null,
+            'Lizmap_User' => '',
+            'Lizmap_User_Groups' => '',
+            'exp_filter' => '( testParam ) AND ( filter ) AND ( test )',
+            'propertyname' => 'prop,test attr',
+        );
+
+        return array(
+            array($params1, $filters1, $expected1),
+            array($params2, $filters1, $expected2),
+        );
+    }
+
+    /**
+     * @dataProvider getParametersWithFiltersData
+     *
+     * @param mixed $params
+     * @param mixed $loginFilters
+     * @param mixed $expectedParameters
+     */
+    #[DataProvider('getParametersWithFiltersData')]
+    public function testParametersWithFilters($params, $loginFilters, $expectedParameters): void
+    {
+        $testContext = new ContextForTests();
+        $testContext->setResult(array('lizmap.tools.loginFilteredLayers.override' => false));
+        $proj = new ProjectForOGCForTests($testContext);
+        $proj->loginFilters = $loginFilters;
+        $proj->setRepo(new Repository('test', array(), '', null, $testContext));
+        $wfs = new WFSRequest($proj, $params, null);
+        $parameters = $wfs->parameters();
+        $this->assertEquals($expectedParameters, $parameters);
+    }
+
+    public static function getGetFeatureIdFilterExpData()
+    {
+        return array(
+            array('', '', '', array()), // nothing
+            array('type.1', '', '', array()), // only featureid
+            array('type', 'type', '', array()), // featureid not well formed
+            array('type.', 'type', '', array()), // fetaureid not well formed
+            array('type.1', 'typed', '', array()), // featureid and typename are not for the same layer
+            array('type.test@@55', 'type', '', array()), // featureid with multi fields key not for postgres layer
+            array('type.test@@55', 'type', '', array('provider' => 'postgres')), // featureid with multi fields key for postgres layer with simple field key
+            array('type.1', 'type', '$id IN (1)', array()),
+            array('type.1,type.2', 'type', '$id IN (1, 2)', array()),
+            array('type.1', 'type', '"id" IN (1)', array('provider' => 'postgres')),
+            array('type.1,type.2', 'type', '"id" IN (1, 2)', array('provider' => 'postgres')),
+            array('type.test', 'type', '"id" IN (\'test\')', array('provider' => 'postgres')),
+            array('type.test@@55', 'type', '("foo" = \'test\' AND "id" = 55)', array('provider' => 'postgres', 'dtparams' => array('key' => 'foo,id'))),
+            array('type.test@@55,type.bar@@44', 'type', '("foo" = \'test\' AND "id" = 55) OR ("foo" = \'bar\' AND "id" = 44)', array('provider' => 'postgres', 'dtparams' => array('key' => 'foo,id'))),
+        );
+    }
+
+    /**
+     * @dataProvider getGetFeatureIdFilterExpData
+     *
+     * @param mixed $featureid
+     * @param mixed $typename
+     * @param mixed $expectedExpFilter
+     * @param mixed $layerOptions
+     */
+    #[DataProvider('getGetFeatureIdFilterExpData')]
+    public function testGetFeatureIdFilterExp($featureid, $typename, $expectedExpFilter, $layerOptions): void
+    {
+        $wfs = new WFSRequestForTests();
+        $wfs->appContext = new ContextForTests();
+        $qgisLayer = new LayerWFSForTests();
+        if ($layerOptions) {
+            if (array_key_exists('provider', $layerOptions)) {
+                $qgisLayer->provider = $layerOptions['provider'];
+            }
+            if (array_key_exists('dtparams', $layerOptions)) {
+                $qgisLayer->dtparams = $layerOptions['dtparams'];
+            }
+        }
+        $expFilter = $wfs->getFeatureIdFilterExpForTests($featureid, $typename, $qgisLayer);
+        $this->assertEquals($expectedExpFilter, $expFilter);
+    }
+
+    public static function getBuildQueryBaseData()
+    {
+        $paramsComplete = array(
+            'propertyname' => 'prop,erty,name',
+            'geometryname' => 'geom',
+        );
+        $wfsFields = array('prop', 'name', 'notProp');
+        $paramsGeom = array(
+            'geometryname' => 'geom',
+        );
+        $paramsProp = array(
+            'propertyname' => 'prop,erty,name',
+            'geometryname' => 'none',
+        );
+
+        return array(
+            array($paramsComplete, $wfsFields, array('"prop"', '"name"', '"key"', '"geom"', '"test"'), ' SELECT "prop", "name", "key", "geom", "test", "geocol" AS "geosource" FROM table'),
+            array($paramsGeom, $wfsFields, array('"prop"', '"name"', '"notProp"', '"key"', '"geom"', '"test"'), ' SELECT "prop", "name", "notProp", "key", "geom", "test", "geocol" AS "geosource" FROM table'),
+            array($paramsProp, $wfsFields, array('"prop"', '"name"', '"key"', '"geom"', '"test"'), ' SELECT "prop", "name", "key", "geom", "test" FROM table'),
+        );
+    }
+
+    /**
+     * @dataProvider getBuildQueryBaseData
+     *
+     * @param mixed $params
+     * @param mixed $wfsFields
+     * @param mixed $expectedSelectFields
+     * @param mixed $expectedSql
+     */
+    #[DataProvider('getBuildQueryBaseData')]
+    public function testBuildQueryBase($params, $wfsFields, $expectedSelectFields, $expectedSql): void
+    {
+        $cnx = new jDbConnectionForTests();
+        $wfs = new WFSRequestForTests();
+        $wfs->datasource = (object) array(
+            'key' => 'key,prop,geom,test',
+            'geocol' => 'geocol',
+            'table' => 'table',
+        );
+        $sql = $wfs->buildQueryBaseForTests($cnx, $params, $wfsFields);
+        $this->assertEquals($expectedSql, $sql);
+        $this->assertEquals($expectedSelectFields, $wfs->selectFields);
+    }
+
+    public static function getGetBboxSqlData()
+    {
+        return array(
+            array('', array(), ''),
+            array('geocol', array(), ''),
+            array('geocol', array('bbox' => 'test, not, 4'), ''),
+            array('geocol', array('bbox' => 'test, not, num, eric'), ''),
+            array('geocol', array('bbox' => '1  , 2.2323, 1234, 4242'), ' AND ST_Intersects("geocol", ST_MakeEnvelope(1,2.2323,1234,4242, SRID))'),
+
+            // WFS 1.1.0: CRS appended as 5th BBOX element → extracted and used as input SRID;
+            // envelope is then reprojected to the layer SRID (returned as 'SRID' by the mock).
+            array('geocol', array('bbox' => '421900,5397601,440825,5412976,EPSG:3857'), ' AND ST_Intersects("geocol", ST_Transform(ST_MakeEnvelope(421900,5397601,440825,5412976, 3857), SRID))'),
+
+            // Explicit SRSNAME param takes priority over the 5th BBOX element.
+            array('geocol', array('bbox' => '421900,5397601,440825,5412976,EPSG:3857', 'srsname' => 'EPSG:2154'), ' AND ST_Intersects("geocol", ST_Transform(ST_MakeEnvelope(421900,5397601,440825,5412976, 2154), SRID))'),
+
+            // 6 elements → still invalid, returns empty.
+            array('geocol', array('bbox' => '1,2,3,4,5,6'), ''),
+
+            // 5 elements but 5th is not a valid CRS string → a warning is logged and
+            // the input CRS falls back to the layer SRID (no ST_Transform wrapping).
+            array('geocol', array('bbox' => '1,2,3,4,notacrs'), ' AND ST_Intersects("geocol", ST_MakeEnvelope(1,2,3,4, SRID))'),
+
+            // Garbage SRSNAME param → logged and fallback to layer SRID (no ST_Transform).
+            array('geocol', array('bbox' => '1,2,3,4', 'srsname' => 'not-a-crs'), ' AND ST_Intersects("geocol", ST_MakeEnvelope(1,2,3,4, SRID))'),
+        );
+    }
+
+    /**
+     * @dataProvider getGetBboxSqlData
+     *
+     * @param mixed $geocol
+     * @param mixed $params
+     * @param mixed $expectedSql
+     */
+    #[DataProvider('getGetBboxSqlData')]
+    public function testGetBboxSql($geocol, $params, $expectedSql): void
+    {
+        $wfs = new WFSRequestForTests();
+        $wfs->datasource = (object) array(
+            'geocol' => $geocol,
+        );
+        $wfs->qgisLayer = new LayerWFSForTests();
+        // Needed for the invalid-SRSNAME code path which calls logMessage.
+        $wfs->appContext = new ContextForTests();
+        $sql = $wfs->getBboxSqlForTests($params);
+        $bboxDesc = isset($params['bbox']) ? $params['bbox'] : '(none)';
+        $srsDesc = isset($params['srsname']) ? $params['srsname'] : '(none)';
+        $this->assertEquals(
+            $expectedSql,
+            $sql,
+            "getBboxSql mismatch — geocol=\"{$geocol}\" bbox=\"{$bboxDesc}\" srsname=\"{$srsDesc}\"\n"
+            ."Expected SQL : \"{$expectedSql}\"\n"
+            ."Actual SQL   : \"{$sql}\""
+        );
+    }
+
+    public static function getSetGeojsonSqlOutputCrsData()
+    {
+        return array(
+            // Default output SRID (4326): geometry and bbox reprojected to EPSG:4326.
+            array(4326, 'ST_Transform(lg.geosource::geometry, 4326)', 'ST_Transform(ST_Envelope(lg.geosource::geometry), 4326)'),
+            // Map-projection SRID (3857): geometry and bbox reprojected to EPSG:3857.
+            array(3857, 'ST_Transform(lg.geosource::geometry, 3857)', 'ST_Transform(ST_Envelope(lg.geosource::geometry), 3857)'),
+            // Swiss national grid (2056).
+            array(2056, 'ST_Transform(lg.geosource::geometry, 2056)', 'ST_Transform(ST_Envelope(lg.geosource::geometry), 2056)'),
+        );
+    }
+
+    /**
+     * Verify that setGeojsonSql wraps both the feature geometry and the bounding-box
+     * geometry in ST_Transform(…, $outputSrid) so that WFS responses are returned in
+     * the CRS requested by the client.
+     *
+     * @dataProvider getSetGeojsonSqlOutputCrsData
+     *
+     * @param mixed $outputSrid
+     * @param mixed $expectedGeomSql
+     * @param mixed $expectedBboxSql
+     */
+    #[DataProvider('getSetGeojsonSqlOutputCrsData')]
+    public function testSetGeojsonSqlOutputCrs($outputSrid, $expectedGeomSql, $expectedBboxSql): void
+    {
+        $cnx = new jDbConnectionForTests();
+        $wfs = new WFSRequestForTests();
+        $wfs->datasource = (object) array(
+            'geocol' => 'geom',
+            'key' => 'id',
+            'table' => 'myschema.mytable',
+        );
+        $wfs->selectFields = array('"id"', '"name"');
+
+        $sql = $wfs->setGeojsonSqlForTests(
+            'SELECT "id", "name", "geom" AS "geosource" FROM myschema.mytable',
+            $cnx,
+            'mytable',
+            'geom',
+            $outputSrid
+        );
+
+        $this->assertStringContainsString(
+            $expectedGeomSql,
+            $sql,
+            "Feature geometry should be reprojected to SRID {$outputSrid}"
+        );
+        $this->assertStringContainsString(
+            $expectedBboxSql,
+            $sql,
+            "Bounding-box geometry should be reprojected to SRID {$outputSrid}"
+        );
+        $this->assertStringContainsString('ST_AsGeoJSON', $sql);
+    }
+
+    public static function getParseExpFilterData()
+    {
+        return array(
+            array(array(), '', ''),
+            // Forbidden term
+            array(array('exp_filter' => 'select'), '', false),
+            // Correct syntax
+            array(array('exp_filter' => '"filter" IN (3, 56, 12)'), '', ' AND ( "filter" IN (3, 56, 12) )'),
+            // Check $id is replaced by the primary key field with double quotes
+            array(array('exp_filter' => '1 < 2 AND $id = 5'), 'key', ' AND ( 1 < 2 AND "key" = 5 )'),
+            // Check we allow negative numbers (not only integers)
+            array(array('exp_filter' => '"a_field" BETWEEN -5678 AND 5.01'), '', ' AND ( "a_field" BETWEEN -5678 AND 5.01 )'),
+            array(array('exp_filter' => '$id IN ( -9999999 )'), 'key', ' AND ( "key" IN ( -9999999 ) )'),
+            // In the case of a multiple primary key, the expression is not valid
+            array(array('exp_filter' => 'filter for test with $id = 5'), 'key,otherKey', false),
+            // missing closing parenthesis
+            array(array('exp_filter' => '"field" = 50 ('), '', false),
+            // field names must be double-quoted
+            array(array('exp_filter' => 'other_field > 3'), '', false),
+            // Complex query with forbidden words and comments
+            array(array('exp_filter' => '"id" = 1 ) GROUP BY "v" UNION SELECT 99 AS "v" , 1 AS "c" --'), '', false),
+            // Doubled single quote inside a string literal must be preserved
+            array(array('exp_filter' => "\"label\" IN ( 'O''Brian' )"), '', " AND ( \"label\" IN ( 'O''Brian' ) )"),
+            // Doubled double quote inside a field name must be preserved
+            array(array('exp_filter' => '"bad""label" = \'OK\''), '', ' AND ( "bad""label" = \'OK\' )'),
+            // We must accept any UTF-8 character in a string literal, including non-ASCII characters
+            array(array('exp_filter' => '"label" = \'Œuvres, Café, crème brûlée, jalapeño, résumé\''), '', ' AND ( "label" = \'Œuvres, Café, crème brûlée, jalapeño, résumé\' )'),
+        );
+    }
+
+    /**
+     * @dataProvider getParseExpFilterData
+     *
+     * @param mixed $params
+     * @param mixed $key
+     * @param mixed $expectedSql
+     */
+    #[DataProvider('getParseExpFilterData')]
+    public function testParseExpFilter($params, $key, $expectedSql): void
+    {
+        $wfs = new WFSRequestForTests();
+        $wfs->appContext = new ContextForTests();
+        $wfs->datasource = (object) array('key' => $key, 'geocol' => 'geom');
+        $result = $wfs->parseExpFilterForTests(new jDbConnectionForTests(), $params);
+        $this->assertEquals($expectedSql, $result);
+    }
+
+    public static function getParseFeatureIdData()
+    {
+        return array(
+            // No Feature ID
+            array('', '', '', ''),
+            array('type', '', '', ''),
+            array('type', '', 'key', ''),
+            array('type', '', 'key,otherKey', ''),
+            // Single column for feature ID
+            array('type', 'type.42', 'key', '"key" IN (42)'),
+            array('type', 'type.42,type.43,type.44', 'key', '"key" IN (42, 43, 44)'),
+            array('type', 'type.abc,you shall not pass,type.def', 'key', '"key" IN (\'abc\', \'def\')'),
+            array('', 'type.42', 'key', '"key" IN (42)'),
+            // Multi columns for feature ID
+            array('type', 'type.test@@55', 'key,otherKey', '("key" = \'test\' AND "otherKey" = 55)'),
+            array('type', 'type.test@@55,you shall not pass,type.name@@42', 'key,otherKey', '("key" = \'test\' AND "otherKey" = 55) OR ("key" = \'name\' AND "otherKey" = 42)'),
+            array('', 'type.test@@55', 'key,otherKey', '("key" = \'test\' AND "otherKey" = 55)'),
+            // A FEATUREID matching no feature must not widen the result set
+            array('type', 'otherType', 'key', 'FALSE'),
+            array('type', 'otherType-42', 'key', 'FALSE'),
+            array('type', 'otherType.', 'key', 'FALSE'),
+            array('type', 'otherType.42', 'key', 'FALSE'),
+            array('type', 'otherType', 'key,otherKey', 'FALSE'),
+            array('type', 'otherType.test@@55', 'key,otherKey', 'FALSE'),
+
+        );
+    }
+
+    /**
+     * @dataProvider getParseFeatureIdData
+     *
+     * @param mixed $typename
+     * @param mixed $featureId
+     * @param mixed $keys
+     * @param mixed $expectedSql
+     */
+    #[DataProvider('getParseFeatureIdData')]
+    public function testParseFeatureId($typename, $featureId, $keys, $expectedSql): void
+    {
+        $params = array(
+            'typename' => $typename,
+            'featureid' => $featureId,
+        );
+        $wfs = new WFSRequestForTests();
+        $wfs->datasource = (object) array('key' => $keys);
+        $sql = $wfs->parseFeatureIdForTests(new jDbConnectionForTests(), $params);
+        $this->assertEquals($expectedSql, $sql);
+    }
+
+    public static function getWhereClauseData()
+    {
+        return array(
+            array(array(), ' WHERE True'),
+            // BBOX
+            array(array('bbox' => '-5,-2,5,2'), ' WHERE True AND ST_Intersects("geom", ST_MakeEnvelope(-5,-2,5,2, SRID))'),
+            // EXP_FILTER
+            array(array('exp_filter' => '"filter" IN (3, 56, 12)'), ' WHERE True AND ( "filter" IN (3, 56, 12) )'),
+            // Feature ID
+            array(array('featureid' => 'type.42'), ' WHERE True AND ( "key" IN (42) )'),
+            array(array('featureid' => 'type.42,type.43'), ' WHERE True AND ( "key" IN (42, 43) )'),
+            // Combinations
+            array(
+                array('bbox' => '-5,-2,5,2', 'exp_filter' => '"filter" IN (3, 56, 12)'),
+                ' WHERE True AND ST_Intersects("geom", ST_MakeEnvelope(-5,-2,5,2, SRID)) AND ( "filter" IN (3, 56, 12) )',
+            ),
+            array(
+                array('bbox' => '-5,-2,5,2', 'featureid' => 'type.42'),
+                ' WHERE True AND ST_Intersects("geom", ST_MakeEnvelope(-5,-2,5,2, SRID)) AND ( "key" IN (42) )',
+            ),
+            array(
+                array('exp_filter' => '"filter" IN (3, 56, 12)', 'featureid' => 'type.42'),
+                ' WHERE True AND ( "filter" IN (3, 56, 12) ) AND ( "key" IN (42) )',
+            ),
+            array(
+                array('bbox' => '-5,-2,5,2', 'exp_filter' => '"filter" IN (3, 56, 12)', 'featureid' => 'type.42'),
+                ' WHERE True AND ST_Intersects("geom", ST_MakeEnvelope(-5,-2,5,2, SRID)) AND ( "filter" IN (3, 56, 12) ) AND ( "key" IN (42) )',
+            ),
+        );
+    }
+
+    /**
+     * @dataProvider getWhereClauseData
+     *
+     * @param mixed $params
+     * @param mixed $expectedSql
+     */
+    #[DataProvider('getWhereClauseData')]
+    public function testgetWhereClause($params, $expectedSql): void
+    {
+        $wfs = new WFSRequestForTests();
+        $wfs->datasource = (object) array(
+            'key' => 'key',
+            'geocol' => 'geom',
+            'sql' => '',
+        );
+        $wfs->qgisLayer = new LayerWFSForTests();
+        // Needed for the invalid-SRSNAME code path which calls logMessage.
+        $wfs->appContext = new ContextForTests();
+        $result = '';
+        $result = $wfs->getWhereClauseForTests(new jDbConnectionForTests(), $params);
+        $this->assertEquals($expectedSql, $result);
+    }
+
+    public static function getGetQueryOrderData()
+    {
+        return array(
+            array(array(), array(), ''),
+            array(array('sortby' => ''), array(), ''),
+            array(array('sortby' => 'id a,test d,wfs a'), array(), ''),
+            array(array('sortby' => 'id a,test d,wfs a'), array('test', 'field', 'wfs'), ' ORDER BY "test" DESC, "wfs" ASC'),
+            // Test with uppercase 'D'
+            array(array('sortby' => 'id a,test D,wfs a'), array('test', 'field', 'wfs'), ' ORDER BY "test" DESC, "wfs" ASC'),
+            // Test with 'desc' keyword (lowercase)
+            array(array('sortby' => 'id a,test desc,wfs a'), array('test', 'field', 'wfs'), ' ORDER BY "test" DESC, "wfs" ASC'),
+            // Test with 'DESC' keyword (uppercase)
+            array(array('sortby' => 'id a,test DESC,wfs a'), array('test', 'field', 'wfs'), ' ORDER BY "test" DESC, "wfs" ASC'),
+            // Test with '+d' prefix
+            array(array('sortby' => 'id a,test +d,wfs a'), array('test', 'field', 'wfs'), ' ORDER BY "test" DESC, "wfs" ASC'),
+            // Test with '+D' prefix
+            array(array('sortby' => 'id a,test +D,wfs a'), array('test', 'field', 'wfs'), ' ORDER BY "test" DESC, "wfs" ASC'),
+            // Test with '+desc' prefix
+            array(array('sortby' => 'id a,test +desc,wfs a'), array('test', 'field', 'wfs'), ' ORDER BY "test" DESC, "wfs" ASC'),
+            // Test with '+DESC' prefix
+            array(array('sortby' => 'id a,test +DESC,wfs a'), array('test', 'field', 'wfs'), ' ORDER BY "test" DESC, "wfs" ASC'),
+            // Test with mixed case variations
+            array(array('sortby' => 'id Desc,test +D,wfs desc'), array('id', 'test', 'wfs'), ' ORDER BY "id" DESC, "test" DESC, "wfs" DESC'),
+            // Test single field with DESC
+            array(array('sortby' => 'id desc'), array('id'), ' ORDER BY "id" DESC'),
+            // Test single field with +DESC
+            array(array('sortby' => 'id +DESC'), array('id'), ' ORDER BY "id" DESC'),
+        );
+    }
+
+    /**
+     * @dataProvider getGetQueryOrderData
+     *
+     * @param mixed $params
+     * @param mixed $wfsFields
+     * @param mixed $expectedSql
+     */
+    #[DataProvider('getGetQueryOrderData')]
+    public function testGetQueryOrder($params, $wfsFields, $expectedSql): void
+    {
+        $wfs = new WFSRequestForTests();
+        $result = '';
+        $result = $wfs->getQueryOrderForTests(new jDbConnectionForTests(), $params, $wfsFields);
+        $this->assertEquals($expectedSql, $result);
+    }
+
+    public static function getValidateFilterData()
+    {
+        return array(
+            array('select', false),
+            array('selectoioio', false),
+            // Every geometry predicate offered by the selection tool must be
+            // translated to its PostGIS ST_* equivalent, not only "intersects".
+            array('intersects($geometry, geom_from_gml(\'g\'))', 'ST_Intersects("column", ST_GeomFromGML(\'g\'))'),
+            array('contains($geometry, geom_from_gml(\'g\'))', 'ST_Contains("column", ST_GeomFromGML(\'g\'))'),
+            array('within($geometry, geom_from_gml(\'g\'))', 'ST_Within("column", ST_GeomFromGML(\'g\'))'),
+            array('crosses($geometry, geom_from_gml(\'g\'))', 'ST_Crosses("column", ST_GeomFromGML(\'g\'))'),
+            array('overlaps($geometry, geom_from_gml(\'g\'))', 'ST_Overlaps("column", ST_GeomFromGML(\'g\'))'),
+            array('touches($geometry, geom_from_gml(\'g\'))', 'ST_Touches("column", ST_GeomFromGML(\'g\'))'),
+            array('disjoint($geometry, geom_from_gml(\'g\'))', 'ST_Disjoint("column", ST_GeomFromGML(\'g\'))'),
+            // Operators are matched case-insensitively and tolerate whitespace before "(".
+            array('INTERSECTS ($geometry, geom_from_gml(\'g\'))', 'ST_Intersects("column", ST_GeomFromGML(\'g\'))'),
+            // A predicate combined with another expression must keep both parts.
+            array('"field" > 3 AND within($geometry, geom_from_gml(\'g\'))', '"field" > 3 AND ST_Within("column", ST_GeomFromGML(\'g\'))'),
+            // A bare word that is not a function call must be left untouched.
+            array('"name" = \'it intersects here\'', '"name" = \'it intersects here\''),
+        );
+    }
+
+    /**
+     * @dataProvider getValidateFilterData
+     *
+     * @param mixed $filter
+     * @param mixed $expectedFilter
+     */
+    #[DataProvider('getValidateFilterData')]
+    public function testValidateFilter($filter, $expectedFilter): void
+    {
+        $wfs = new WFSRequestForTests();
+        $wfs->appContext = new ContextForTests();
+        $wfs->datasource = (object) array(
+            'geocol' => 'column',
+        );
+        $this->assertEquals($expectedFilter, $wfs->validateFilterForTests($filter));
+    }
+
+    public static function getParseDatasourceSqlData()
+    {
+        return array(
+            array('', ''),
+            array('"field_a" > 30 ', ' AND ( "field_a" > 30 ) '),
+            array('  "field_a" > 30 OR "other" = 10       ', ' AND ( "field_a" > 30 OR "other" = 10 ) '),
+        );
+    }
+
+    /**
+     * @dataProvider getParseDatasourceSqlData
+     *
+     * @param mixed $sql
+     * @param mixed $expectedSql
+     */
+    #[DataProvider('getParseDatasourceSqlData')]
+    public function testParseDatasourceSql($sql, $expectedSql): void
+    {
+        $wfs = new WFSRequestForTests();
+        $wfs->appContext = new ContextForTests();
+        $wfs->datasource = (object) array('sql' => $sql);
+        $result = $wfs->getDatasourceSqlForTests();
+        $this->assertEquals($expectedSql, $result);
+    }
+
+    public static function getSetGeojsonSqlOutputSridData()
+    {
+        return array(
+            // Default: no SRSNAME → output geometry and bbox use EPSG:4326.
+            array(4326, 'ST_Transform(lg.geosource::geometry, 4326)', 'ST_Transform(ST_Envelope(lg.geosource::geometry), 4326)'),
+            // SRSNAME = EPSG:3857 → output in Web Mercator.
+            array(3857, 'ST_Transform(lg.geosource::geometry, 3857)', 'ST_Transform(ST_Envelope(lg.geosource::geometry), 3857)'),
+            // SRSNAME = EPSG:2154 → output in Lambert-93.
+            array(2154, 'ST_Transform(lg.geosource::geometry, 2154)', 'ST_Transform(ST_Envelope(lg.geosource::geometry), 2154)'),
+        );
+    }
+
+    /**
+     * @dataProvider getSetGeojsonSqlOutputSridData
+     *
+     * @param mixed $outputSrid
+     * @param mixed $expectedGeomTransform
+     * @param mixed $expectedBboxTransform
+     */
+    #[DataProvider('getSetGeojsonSqlOutputSridData')]
+    public function testSetGeojsonSqlOutputSrid($outputSrid, $expectedGeomTransform, $expectedBboxTransform): void
+    {
+        $wfs = new WFSRequestForTests();
+        $wfs->datasource = (object) array('key' => 'id', 'geocol' => 'geom');
+        $wfs->selectFields = array('"id"');
+
+        $sql = $wfs->setGeojsonSqlForTests(
+            'SELECT "id", "geom" AS "geosource" FROM mytable',
+            new jDbConnectionForTests(),
+            'my_layer',
+            'geom',
+            $outputSrid
+        );
+
+        $this->assertStringContainsString(
+            $expectedGeomTransform,
+            $sql,
+            "outputSrid={$outputSrid}: geometry transform not found in generated SQL.\n"
+            ."Expected to contain : \"{$expectedGeomTransform}\"\n"
+            ."Generated SQL snippet:\n".substr($sql, strpos($sql, 'ST_Transform') ?: 0, 300)
+        );
+        $this->assertStringContainsString(
+            $expectedBboxTransform,
+            $sql,
+            "outputSrid={$outputSrid}: bbox transform not found in generated SQL.\n"
+            ."Expected to contain : \"{$expectedBboxTransform}\"\n"
+            ."Generated SQL snippet:\n".substr($sql, strpos($sql, 'ST_Envelope') ?: 0, 300)
+        );
+    }
+
+    public static function getParseSrsnameSridData()
+    {
+        return array(
+            // Typical EPSG short form.
+            array('EPSG:4326', 4326),
+            array('EPSG:3857', 3857),
+            array('EPSG:2154', 2154),
+            // OGC URN form.
+            array('urn:ogc:def:crs:EPSG::4326', 4326),
+            // Empty string → null.
+            array('', null),
+            // No digits at the end → null.
+            array('not-a-crs', null),
+            array('EPSG:foo', null),
+            array('EPSG:', null),
+            // Negative / sign prefix is not considered ctype_digit → null.
+            array('EPSG:-4326', null),
+        );
+    }
+
+    /**
+     * @dataProvider getParseSrsnameSridData
+     *
+     * @param mixed $srsname
+     * @param mixed $expected
+     */
+    #[DataProvider('getParseSrsnameSridData')]
+    public function testParseSrsnameSrid($srsname, $expected): void
+    {
+        $wfs = new WFSRequestForTests();
+        $this->assertSame($expected, $wfs->parseSrsnameSridForTests($srsname));
+    }
+
+    public function testBuildGetFeatureParameters(): void
+    {
+        $genericParameters = WFSRequestForTests::$genericGetFeatureParameters;
+        $params = WFSRequestForTests::buildGetFeatureParameters('test');
+        $this->assertEquals(
+            $params,
+            array(
+                'SERVICE' => 'WFS',
+                'VERSION' => '1.0.0',
+                'REQUEST' => 'GetFeature',
+                'OUTPUTFORMAT' => 'GeoJSON',
+                'TYPENAME' => 'test',
+            ),
+        );
+
+        $params = WFSRequestForTests::buildGetFeatureParameters(
+            'test',
+            array('OUTPUTFORMAT' => 'GML3'),
+        );
+        $this->assertEquals(
+            $params,
+            array(
+                'SERVICE' => 'WFS',
+                'VERSION' => '1.0.0',
+                'REQUEST' => 'GetFeature',
+                'OUTPUTFORMAT' => 'GML3',
+                'TYPENAME' => 'test',
+            ),
+        );
+    }
+
+    public function testBuildGetFeatureHitsParameters(): void
+    {
+        $genericParameters = WFSRequestForTests::$genericGetFeatureParameters;
+        $params = WFSRequestForTests::buildGetFeatureHitsParameters('test');
+        $this->assertEquals(
+            $params,
+            array(
+                'SERVICE' => 'WFS',
+                'VERSION' => '1.0.0',
+                'REQUEST' => 'GetFeature',
+                'OUTPUTFORMAT' => 'GeoJSON',
+                'TYPENAME' => 'test',
+                'RESULTTYPE' => 'hits',
+            ),
+        );
+
+        $params = WFSRequestForTests::buildGetFeatureHitsParameters(
+            'test',
+            array('OUTPUTFORMAT' => 'GML3'),
+        );
+        $this->assertEquals(
+            $params,
+            array(
+                'SERVICE' => 'WFS',
+                'VERSION' => '1.0.0',
+                'REQUEST' => 'GetFeature',
+                'OUTPUTFORMAT' => 'GML3',
+                'TYPENAME' => 'test',
+                'RESULTTYPE' => 'hits',
+            ),
+        );
+    }
+}

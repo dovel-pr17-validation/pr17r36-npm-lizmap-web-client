@@ -1,0 +1,212 @@
+<?php
+
+namespace Lizmap\ActionQuery;
+
+use Lizmap\App\AppContextInterface;
+
+class ActionQuery
+{
+    /** @var \jDbConnection */
+    private $cnx;
+    private AppContextInterface $appContext;
+
+    private string $repository;
+    private string $project;
+    private string $layerId;
+
+    protected static $blockSqlWords = array(
+        ';',
+        'select',
+        'delete',
+        'insert',
+        'update',
+        'drop',
+        'alter',
+        '--',
+        'truncate',
+        'vacuum',
+        'create',
+        'reindex',
+        'grant',
+        'revoke',
+        '/*',
+    );
+
+    public function __construct($cnx, string $repository, string $project, string $layerId, AppContextInterface $appContext)
+    {
+        $this->cnx = $cnx;
+        $this->repository = $repository;
+        $this->project = $project;
+        $this->layerId = $layerId;
+        $this->appContext = $appContext;
+    }
+
+    /**
+     * Build the parameter array passed as a JSON object to lizmap_get_data.
+     *
+     * @param string                $scope     project|layer|feature
+     * @param null|\qgisVectorLayer $qgisLayer
+     * @param int|string            $featureId
+     *
+     * @return array<string, null|int|string>
+     */
+    public function buildParams(
+        string $actionName,
+        string $scope,
+        $qgisLayer,
+        $featureId,
+        string $wkt,
+        string $mapCenter,
+        string $mapExtent
+    ): array {
+        $params = array(
+            'lizmap_repository' => $this->repository,
+            'lizmap_project' => $this->project,
+            'action_name' => $actionName,
+            'action_scope' => $scope,
+            'layer_name' => null,
+            'layer_schema' => null,
+            'layer_table' => null,
+            'feature_id' => null,
+            'map_center' => $mapCenter,
+            'map_extent' => $mapExtent,
+            'wkt' => $wkt,
+        );
+
+        $params['user_login'] = $this->appContext->userIsConnected() ? $this->appContext->getUserSession()->login : 'anonymous';
+
+        if ($qgisLayer && in_array($scope, array('layer', 'feature'))) {
+            $layerDatasource = $qgisLayer->getDatasourceParameters();
+            $params['layer_name'] = $qgisLayer->getName();
+            $params['layer_schema'] = $layerDatasource->schema;
+            $params['layer_table'] = $layerDatasource->tablename;
+            $params['feature_id'] = $featureId;
+        }
+
+        return $params;
+    }
+
+    /**
+     * Validate an string given in action parameter.
+     *
+     * The string are already used in prepared statements
+     * but we still restrain some unwanted chars
+     *
+     * @param string $filter The content to validate
+     *
+     * @return array{0: bool, 1: list<string>} returns if the string does not contain unwanted chars, and the list of blocked items
+     */
+    private function validateActionParameterString(string $filter): array
+    {
+        $block_items = array();
+        $pattern = '#'.implode('|', array_map(fn ($w): string => preg_quote($w, '#'), static::$blockSqlWords)).'#i';
+
+        return array(!preg_match($pattern, $filter, $block_items), $block_items);
+    }
+
+    /**
+     * Build the SQL string and the ordered values list for the prepared statement.
+     *
+     * @param array<string, null|int|string> $params        Output of buildParams()
+     * @param object                         $action        Action config object (must expose ->options)
+     * @param array<string, mixed>           $clientOptions Options sent by the client
+     *
+     * @return array{0: string, 1: list<mixed>} [$sql, $sqlValues]
+     */
+    public function buildSql(array $params, object $action, array $clientOptions): array
+    {
+        $i = 1;
+        $sqlParts = array();
+        $sqlValues = array();
+
+        foreach ($params as $key => $value) {
+            $caster = ($key === 'feature_id') ? 'bigint' : 'text';
+            $sqlParts[] = "'{$key}', (\${$i})::{$caster}";
+            $sqlValues[] = $value;
+            ++$i;
+        }
+
+        // Validate the client options against the action configuration
+        // If the key is not present in the configuration, it will be ignored (this is why we loop over the configuration options and not the client options)
+        // If the key is not present in the client options, the default value from the configuration will be used
+        // If the key is present in the client options, it will be validated against the configuration value
+        // If the value is invalid, the default value from the configuration will be used
+        // Note: an empty client value is considered as a valid value
+        foreach ($action->options as $key => $configValue) {
+            $sqlParts[] = "'{$key}', (\${$i})::text";
+            // Default value is the configuration value
+            if (!array_key_exists($key, $clientOptions)) {
+                $clientValue = $configValue;
+            } else {
+                $clientValue = $clientOptions[$key] ?? '';
+
+                // Check that the given value does not contains forbidden expressions
+                if (!empty($clientValue)) {
+                    [$validFilter, $block_items] = $this->validateActionParameterString($clientValue);
+                    if (!$validFilter) {
+                        $this->appContext->logMessage(
+                            'Invalid value given for the action '.($action->name ?? '').', parameter '.$key.' in project '.$this->repository.'/'.$this->project.
+                            ', layer '.$this->layerId.
+                            ', while using the given value : '.$clientValue.' → blocked items: '.implode(', ', $block_items),
+                            'lizmapadmin'
+                        );
+                        $clientValue = $configValue;
+                    }
+                }
+            }
+            $sqlValues[] = $clientValue;
+            ++$i;
+        }
+        $sql = '
+            SELECT public.lizmap_get_data(
+                json_build_object(
+                '.implode(",\n", $sqlParts).'
+                )
+            ) AS data
+        ';
+
+        return array($sql, $sqlValues);
+    }
+
+    /**
+     * Execute the prepared statement inside a transaction and return the decoded data.
+     *
+     * @param list<mixed> $sqlValues
+     *
+     * @return mixed Decoded JSON data returned by lizmap_get_data
+     *
+     * @throws \Exception on query failure (after rollback + log)
+     */
+    public function execute(string $sql, array $sqlValues)
+    {
+        $this->cnx->beginTransaction();
+
+        try {
+            $resultset = $this->cnx->prepare($sql);
+            $resultset->execute($sqlValues);
+            if ($resultset->id() === false) {
+                throw new \Exception($this->cnx->errorCode());
+            }
+            $this->cnx->commit();
+        } catch (\Exception $e) {
+            $this->cnx->rollback();
+            $this->appContext->logMessage(
+                'Error in project '.$this->repository.'/'.$this->project.
+                ', layer '.$this->layerId.
+                ', while running the action with the PostgreSQL query : '.$sql.' → '.$e->getMessage(),
+                'lizmapadmin'
+            );
+
+            throw $e;
+        }
+
+        $data = array();
+        foreach ($resultset as $r) {
+            if ($r->data) {
+                $data = json_decode($r->data);
+            }
+        }
+
+        return $data;
+    }
+}

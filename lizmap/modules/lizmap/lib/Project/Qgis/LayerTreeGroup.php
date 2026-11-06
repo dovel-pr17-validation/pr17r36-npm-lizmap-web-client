@@ -1,0 +1,165 @@
+<?php
+
+/**
+ * QGIS Layer tree group.
+ *
+ * @author    3liz
+ * @copyright 2023 3liz
+ *
+ * @see      http://3liz.com
+ *
+ * @license Mozilla Public License : http://www.mozilla.org/MPL/
+ */
+
+namespace Lizmap\Project\Qgis;
+
+/**
+ * QGIS Layer tree group.
+ *
+ * @property string                               $name
+ * @property bool                                 $mutuallyExclusive
+ * @property array                                $customproperties
+ * @property array<LayerTreeGroup|LayerTreeLayer> $items
+ * @property null|string                          $shortname
+ * @property null|string                          $title
+ * @property null|string                          $abstract
+ */
+class LayerTreeGroup extends BaseQgisXmlObject
+{
+    /** @var array<string> The instance properties */
+    protected $properties = array(
+        'name',
+        'mutuallyExclusive',
+        'customproperties',
+        'items',
+        'shortname',
+        'title',
+        'abstract',
+    );
+
+    /** @var array The default values for properties */
+    protected $defaultValues = array(
+        'customproperties' => array(),
+        'items' => array(),
+    );
+
+    /** @var string The XML element local name */
+    protected static $qgisLocalName = 'layer-tree-group';
+
+    /** @var array<string> The XML element parsed children */
+    protected static $children = array(
+        'shortname',
+        'title',
+        'abstract',
+    );
+
+    protected static $childParsers = array();
+
+    /** @var array<string, string> The XML element tagname associated with a collector property name */
+    protected static $childrenCollection = array(
+        'layer-tree-group' => 'items',
+        'layer-tree-layer' => 'items',
+    );
+
+    /**
+     * Get attributes from an XMLReader instance at an element.
+     *
+     * @param \XMLReader $oXmlReader An XMLReader instance at an element
+     *
+     * @return array{'name': string} the element attributes as keys / values
+     */
+    protected static function getAttributes($oXmlReader)
+    {
+        return array(
+            'name' => $oXmlReader->getAttribute('name'),
+            'mutuallyExclusive' => filter_var($oXmlReader->getAttribute('mutually-exclusive'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE),
+        );
+    }
+
+    /**
+     * Get group short names.
+     *
+     * @return array<string, string>
+     */
+    public function getGroupShortNames()
+    {
+        $data = array();
+        foreach ($this->items as $item) {
+            if (!$item instanceof LayerTreeGroup) {
+                continue;
+            }
+            $data += $item->getGroupShortNames();
+            if (isset($item->shortname) && $item->shortname != null) {
+                $data[$item->name] = $item->shortname;
+
+                continue;
+            }
+            if (!array_key_exists('wmsShortName', $item->customproperties)) {
+                continue;
+            }
+            $data[$item->name] = $item->customproperties['wmsShortName'];
+        }
+
+        return $data;
+    }
+
+    /**
+     * Get groups mutually exclusive.
+     *
+     * @return array<string>
+     */
+    public function getGroupsMutuallyExclusive()
+    {
+        $data = array();
+        foreach ($this->items as $item) {
+            if (!$item instanceof LayerTreeGroup) {
+                continue;
+            }
+            $data = array_merge($data, $item->getGroupsMutuallyExclusive());
+            if (!$item->mutuallyExclusive) {
+                continue;
+            }
+            $data[] = $item->name;
+        }
+
+        return $data;
+    }
+
+    /**
+     * Get layer show feature count.
+     *
+     * @return array<string>
+     */
+    public function getLayersShowFeatureCount()
+    {
+        $data = array();
+        foreach ($this->items as $item) {
+            if ($item instanceof LayerTreeGroup) {
+                $data = array_merge($data, $item->getLayersShowFeatureCount());
+
+                continue;
+            }
+            if (!$item->customproperties) {
+                continue;
+            }
+            if (!array_key_exists('showFeatureCount', $item->customproperties)) {
+                continue;
+            }
+            if (!filter_var($item->customproperties['showFeatureCount'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)) {
+                continue;
+            }
+            $data[] = $item->name;
+        }
+
+        return $data;
+    }
+}
+LayerTreeGroup::registerChildParser('layer-tree-group', function ($oXmlReader) {
+    return LayerTreeGroup::fromXmlReader($oXmlReader);
+});
+LayerTreeGroup::registerChildParser('layer-tree-layer', function ($oXmlReader) {
+    return LayerTreeLayer::fromXmlReader($oXmlReader);
+});
+LayerTreeGroup::registerChildParser('customproperties', function ($oXmlReader) {
+    return Parser::readCustomProperties($oXmlReader);
+});

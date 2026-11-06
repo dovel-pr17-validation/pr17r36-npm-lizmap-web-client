@@ -1,0 +1,488 @@
+/**
+ * @module modules/Search.js
+ * @name Search
+ * @copyright 2023 3Liz
+ * @license MPL-2.0
+ */
+
+import { Utils } from './Utils.js';
+
+const AUTOCOMPLETE_MIN_LENGTH = 3;
+
+/**
+ * @class
+ * @name Search
+ */
+export default class Search {
+
+    /**
+     * Create a search instance
+     * @param {Map}        map        - OpenLayers map
+     * @param {object}     lizmap3    - The old lizmap object
+     */
+    constructor(map, lizmap3) {
+        // Attributes
+        this._map = map;
+        this._lizmap3 = lizmap3;
+
+        // Add or remove searches!
+        var configOptions = this._lizmap3.config.options;
+        if (('searches' in configOptions) && (configOptions.searches.length > 0)) {
+            this._addSearches();
+            this._addClearHandler();
+        }
+        else {
+            $('#nominatim-search').remove();
+            $('#lizmap-search, #lizmap-search-close').remove();
+        }
+    }
+
+    /**
+     * PRIVATE method: bind the header clear button to reset search state
+     */
+    _addClearHandler() {
+        const headerClear = document.getElementById('header-clear');
+        if (headerClear) {
+            headerClear.addEventListener('click', () => {
+                this._clearSearch();
+            });
+        }
+    }
+
+    /**
+     * Clear search input, results, and map highlight
+     */
+    _clearSearch() {
+        document.getElementById('search-query').value = '';
+        this._map.clearHighlightFeatures();
+        $('#lizmap-search .items').html('');
+        $('#lizmap-search, #lizmap-search-close').removeClass('open');
+    }
+
+    /**
+     * Returns a debounced version of fn that fires after delay ms of inactivity
+     * @param {Function} fn
+     * @param {number} delay - milliseconds
+     * @returns {Function}
+     */
+    _debounce(fn, delay) {
+        let timer;
+        const debounced = (...args) => {
+            clearTimeout(timer);
+            timer = setTimeout(() => fn(...args), delay);
+        };
+        debounced.cancel = () => clearTimeout(timer);
+        return debounced;
+    }
+
+    /**
+     * Returns an auto-search handler that clears results below min length,
+     * otherwise delegates to performFn
+     * @param {Function} performFn - search function to call when input is long enough
+     * @returns {Function}
+     */
+    _buildAutoSearch(performFn) {
+        return () => {
+            if (document.getElementById('search-query').value.length < AUTOCOMPLETE_MIN_LENGTH) {
+                document.querySelector('#lizmap-search .items').innerHTML = '';
+                document.querySelectorAll('#lizmap-search, #lizmap-search-close').forEach(el => el.classList.remove('open'));
+                return;
+            }
+            performFn();
+        };
+    }
+
+    /**
+     * Start the external search
+     */
+    _startExternalSearch() {
+        if ($('#search-query').val().length != 0) {
+            $('#lizmap-search .items li > a').unbind('click');
+            $('#lizmap-search .items').html('<li class="start"><ul><li>' + lizDict['externalsearch.search'] + '</li></ul></li>');
+            $('#lizmap-search, #lizmap-search-close').addClass('open');
+        } else {
+            this._lizmap3.addMessage(lizDict['externalsearch.noquery'], 'info', true).attr('id', 'lizmap-search-message');
+        }
+    }
+
+    /**
+     * Get the highlight regular expression
+     * @returns {RegExp} The regular expression
+     */
+    _getHighlightRegEx() {
+        // Format answers to highlight searched keywords
+        var sqval = $('#search-query').val();
+        var sqvals = sqval.split(' ');
+        var sqvalsn = [];
+        var sqrex = '(';
+        for (var i in sqvals) {
+            var sqi = sqvals[i].trim();
+            if (sqi == '') {
+                continue;
+            }
+            sqvalsn.push(sqi);
+            if (sqi != this._lizmap3.cleanName(sqi)) {
+                sqvalsn.push(this._lizmap3.cleanName(sqi));
+            }
+        }
+        sqrex += sqvalsn.join('|');
+        sqrex += ')';
+        return new RegExp(sqrex, "ig");
+    }
+
+    /**
+     * PRIVATE method: fire a lizmapFts search request and display results
+     * @param {object} searchConfig - search configuration
+     * @param {OpenLayers.Bounds} extent - WGS84 map extent for filtering
+     */
+    _performFtsSearch(searchConfig, extent) {
+        this._startExternalSearch();
+
+        const labrex = this._getHighlightRegEx();
+        const url = new URL(searchConfig.url, location.href);
+        url.searchParams.set('repository', globalThis['lizUrls'].params.repository);
+        url.searchParams.set('project', globalThis['lizUrls'].params.project);
+        url.searchParams.set('query', document.getElementById('search-query').value);
+
+        Utils.fetchJSON(url.toString()).then(results => {
+            var text = '';
+            var count = 0;
+
+            for (var ftsId in results) {
+                var ftsLayerResult = results[ftsId];
+                text += '<li><strong>' + ftsLayerResult.search_name + '</strong>';
+                text += '<ul>';
+                for (var i = 0, len = ftsLayerResult.features.length; i < len; i++) {
+                    var ftsFeat = ftsLayerResult.features[i];
+                    var ftsGeometry = OpenLayers.Geometry.fromWKT(ftsFeat.geometry);
+                    if (ftsLayerResult.srid != 'EPSG:4326') {
+                        ftsGeometry.transform(ftsLayerResult.srid, 'EPSG:4326');
+                    }
+                    var bbox = ftsGeometry.getBounds();
+                    if (extent.intersectsBounds(bbox)) {
+                        var lab = ftsFeat.label.replace(labrex, '<strong class="highlight">$1</strong>');
+                        text += '<li><a href="#' + bbox.toBBOX() + '" data-wkt="' + ftsGeometry.toString() + '">' + lab + '</a></li>';
+                        count++;
+                    }
+                }
+                text += '</ul></li>';
+            }
+
+            if (count != 0 && text != '') {
+                this._updateExternalSearch(text, searchConfig.service);
+            } else {
+                this._updateExternalSearch('<li><strong>' + lizDict['externalsearch.mapdata'] + '</strong><ul><li>' + lizDict['externalsearch.notfound'] + '</li></ul></li>', searchConfig.service);
+            }
+        });
+    }
+
+    /**
+     * PRIVATE method: add lizmapFts search capability with autocomplete
+     * @param {object} searchConfig - search configuration
+     * @returns {boolean} search is in the user interface
+     */
+    _addSearch(searchConfig) {
+        if (searchConfig.type == 'externalSearch') {
+            return false;
+        }
+        if (!searchConfig.url) {
+            return false;
+        }
+
+        // define max extent for searches
+        var wgs84 = new OpenLayers.Projection('EPSG:4326');
+        var extent = new OpenLayers.Bounds(this._lizmap3.map.maxExtent.toArray());
+        extent.transform(this._map.getView().getProjection().getCode(), wgs84);
+
+        const autoSearch = this._buildAutoSearch(() => this._performFtsSearch(searchConfig, extent));
+        const debouncedAutoSearch = this._debounce(autoSearch, 100);
+
+        document.getElementById('nominatim-search').addEventListener('submit', evt => {
+            evt.preventDefault();
+            // Cancel any pending debounced auto-search so it doesn't fire a
+            // redundant duplicate request for the same query right after this
+            // explicit submit (which could later resolve out of order and
+            // overwrite the results of a subsequent search).
+            debouncedAutoSearch.cancel();
+            this._performFtsSearch(searchConfig, extent);
+        });
+
+        document.getElementById('search-query').addEventListener('input', debouncedAutoSearch);
+
+        return true;
+    }
+
+    /**
+     * PRIVATE method: fire an external geocoder search request and display results
+     * @param {object} searchConfig - search configuration
+     * @param {string|object} service - resolved service URL or Google Geocoder instance
+     * @param {OpenLayers.Bounds} extent - WGS84 map extent for filtering
+     */
+    _performExternalSearch(searchConfig, service, extent) {
+        this._startExternalSearch();
+
+        var labrex = this._getHighlightRegEx();
+        const searchQuery = document.getElementById('search-query').value;
+        switch (searchConfig.service) {
+            case 'nominatim': {
+                const nominatimUrl = new URL(service, window.location.href);
+                nominatimUrl.searchParams.set('query', searchQuery);
+                nominatimUrl.searchParams.set('bbox', extent.toBBOX());
+                Utils.fetchJSON(nominatimUrl.toString()).then(data => {
+                    var text = '';
+                    var count = 0;
+                    for (const address of data) {
+                        if (count > 9) {
+                            return false;
+                        }
+                        if (!address.boundingbox) {
+                            return true;
+                        }
+
+                        var bbox = [
+                            address.boundingbox[2],
+                            address.boundingbox[0],
+                            address.boundingbox[3],
+                            address.boundingbox[1]
+                        ];
+                        bbox = new OpenLayers.Bounds(bbox);
+                        if (extent.intersectsBounds(bbox)) {
+                            var lab = address.display_name.replace(labrex, '<strong class="highlight">$1</strong>');
+                            text += `<li><a href="#${bbox.toBBOX()}" data-wkt="POINT(${address.lon} ${address.lat})">${lab}</a></li>`;
+                            count++;
+                        }
+                    }
+                    if (count == 0 || text == '') {
+                        text = '<li>' + lizDict['externalsearch.notfound'] + '</li>';
+                    }
+                    this._updateExternalSearch('<li><strong>OpenStreetMap</strong><ul>' + text + '</ul></li>', searchConfig.service);
+                });
+                break;
+            }
+            case 'ign': {
+                if (searchQuery.length < AUTOCOMPLETE_MIN_LENGTH || searchQuery.length > 200) {
+                    lizMap.addMessage(lizDict['externalsearch.ignlimit'], 'warning', true);
+                    break;
+                }
+                const ignUrl = new URL(service);
+                ignUrl.searchParams.set('text', searchQuery);
+                ignUrl.searchParams.set('type', 'StreetAddress');
+                ignUrl.searchParams.set('maximumResponses', 10);
+                ignUrl.searchParams.set('bbox', extent.toBBOX());
+                Utils.fetchJSON(ignUrl.toString()).then(data => {
+                    let text = '';
+                    let count = 0;
+                    for (const result of data.results) {
+                        var lab = result.fulltext.replace(labrex, '<strong class="highlight">$1</strong>');
+                        text += `
+                            <li>
+                                <a href="#${result.x},${result.y},${result.x},${result.y}" data-wkt="POINT(${result.x} ${result.y})">
+                                    ${lab}
+                                </a>
+                            </li>`;
+                        count++;
+                    }
+                    if (count == 0 || text == '') {
+                        text = '<li>' + lizDict['externalsearch.notfound'] + '</li>';
+                    }
+                    this._updateExternalSearch('<li><strong>IGN</strong><ul>' + text + '</ul></li>', searchConfig.service);
+                });
+                break;
+            }
+            case 'google':
+                service.geocode({
+                    'address': searchQuery,
+                    'bounds': new google.maps.LatLngBounds(
+                        new google.maps.LatLng(extent.top, extent.left),
+                        new google.maps.LatLng(extent.bottom, extent.right)
+                    )
+                }, (results, status) => {
+                    if (status == google.maps.GeocoderStatus.OK) {
+                        var text = '';
+                        var count = 0;
+                        for (const address of results) {
+                            if (count > 9) {
+                                return false;
+                            }
+                            var bbox = [];
+                            if (address.geometry.viewport) {
+                                bbox = [
+                                    address.geometry.viewport.getSouthWest().lng(),
+                                    address.geometry.viewport.getSouthWest().lat(),
+                                    address.geometry.viewport.getNorthEast().lng(),
+                                    address.geometry.viewport.getNorthEast().lat()
+                                ];
+                            } else if (address.geometry.bounds) {
+                                bbox = [
+                                    address.geometry.bounds.getSouthWest().lng(),
+                                    address.geometry.bounds.getSouthWest().lat(),
+                                    address.geometry.bounds.getNorthEast().lng(),
+                                    address.geometry.bounds.getNorthEast().lat()
+                                ];
+                            }
+                            if (bbox.length != 4) {
+                                return false;
+                            }
+                            bbox = new OpenLayers.Bounds(bbox);
+                            if (extent.intersectsBounds(bbox)) {
+                                var lab = address.formatted_address.replace(labrex, '<strong class="highlight">$1</strong>');
+                                var wkt = 'POINT(' + address.geometry.location.lng() + ' ' + address.geometry.location.lat() + ')';
+                                text += '<li><a href="#' + bbox.toBBOX() + '" data-wkt="' + wkt + '">' + lab + '</a></li>';
+                                count++;
+                            }
+                        }
+                        if (count == 0 || text == '') {
+                            text = '<li>' + lizDict['externalsearch.notfound'] + '</li>';
+                        }
+                        this._updateExternalSearch('<li><strong>Google</strong><ul>' + text + '</ul></li>', searchConfig.service);
+                    } else {
+                        this._updateExternalSearch('<li><strong>Google</strong><ul><li>' + lizDict['externalsearch.notfound'] + '</li></ul></li>', searchConfig.service);
+                    }
+                });
+                break;
+        }
+    }
+
+    /**
+     * PRIVATE method: add external geocoder search capability with autocomplete
+     * @param {object} searchConfig - search configuration
+     * @returns {boolean} external search is in the user interface
+     */
+    _addExternalSearch(searchConfig) {
+        if (searchConfig.type != 'externalSearch') {
+            return false;
+        }
+
+        // define max extent for searches
+        var wgs84 = new OpenLayers.Projection('EPSG:4326');
+        var extent = new OpenLayers.Bounds(this._lizmap3.map.maxExtent.toArray());
+        extent.transform(this._map.getView().getProjection().getCode(), wgs84);
+
+        // define external search service
+        var service = null;
+        switch (searchConfig.service) {
+            case 'nominatim':
+                if ('url' in searchConfig) {
+                    service = OpenLayers.Util.urlAppend(searchConfig.url
+                        , new URLSearchParams(globalThis['lizUrls'].params)
+                    );
+                }
+                break;
+            case 'ign':
+                service = 'https://data.geopf.fr/geocodage/completion/';
+                break;
+            case 'google':
+                if (google && 'maps' in google && 'Geocoder' in google.maps) {
+                    service = new google.maps.Geocoder();
+                }
+                break;
+        }
+
+        if (service == null) {
+            return false;
+        }
+
+        const autoSearch = this._buildAutoSearch(() => this._performExternalSearch(searchConfig, service, extent));
+        const debouncedAutoSearch = this._debounce(autoSearch, 100);
+
+        document.getElementById('nominatim-search').addEventListener('submit', evt => {
+            evt.preventDefault();
+            // Cancel any pending debounced auto-search so it doesn't fire a
+            // redundant duplicate request for the same query right after this
+            // explicit submit (which could later resolve out of order and
+            // overwrite the results of a subsequent search).
+            debouncedAutoSearch.cancel();
+            this._performExternalSearch(searchConfig, service, extent);
+        });
+
+        document.getElementById('search-query').addEventListener('input', debouncedAutoSearch);
+
+        return true;
+    }
+
+    /**
+     * PRIVATE method: _addSearches
+     * add searches capability
+     * @returns {boolean|void} searches added to the user interface
+     */
+    _addSearches() {
+        var configOptions = this._lizmap3.config.options;
+        if (!('searches' in configOptions) || (configOptions.searches.length == 0)) {
+            return;
+        }
+
+        var searchOptions = configOptions.searches;
+        var searchAdded = false;
+        for (var i = 0, len = searchOptions.length; i < len; i++) {
+            var searchOption = searchOptions[i];
+            var searchAddedResult;
+            if (searchOption.type == 'externalSearch') {
+                searchAddedResult = this._addExternalSearch(searchOption);
+            }
+            else {
+                searchAddedResult = this._addSearch(searchOption);
+            }
+            searchAdded = searchAdded || searchAddedResult;
+        }
+        if (!searchAdded) {
+            $('#nominatim-search').remove();
+            $('#lizmap-search, #lizmap-search-close').remove();
+        }
+        return searchAdded;
+    }
+
+    /**
+     * Update external search
+     * @param {string} aHTML HTML to update
+     */
+    _updateExternalSearch(aHTML, sourceKey = 'external') {
+        if ($('#search-query').val().length != 0) {
+            var wgs84 = new OpenLayers.Projection('EPSG:4326');
+
+            $('#lizmap-search .items li > a').unbind('click');
+            // Remove the "searching…" placeholder and any previous results from
+            // the same source. A source can fire twice in quick succession (the
+            // debounced input search plus the Enter submit); replacing its
+            // section instead of appending avoids duplicated results.
+            $('#lizmap-search .items li.start').remove();
+            $('#lizmap-search .items').children(`li[data-search-source="${sourceKey}"]`).remove();
+            const $results = $(aHTML);
+            $results.attr('data-search-source', sourceKey);
+            $('#lizmap-search .items').append($results);
+            $('#lizmap-search, #lizmap-search-close').addClass('open');
+            document.querySelectorAll('#lizmap-search .items li > a').forEach(link => {
+                link.addEventListener('click', evt => {
+                    evt.preventDefault();
+                    const linkClicked = evt.currentTarget;
+                    var bbox = linkClicked.getAttribute('href').replace('#', '');
+                    bbox = OpenLayers.Bounds.fromString(bbox);
+                    bbox.transform(wgs84, this._lizmap3.map.getProjectionObject());
+
+                    var feat = new OpenLayers.Feature.Vector(bbox.toGeometry().getCentroid());
+                    var geomWKT = linkClicked.dataset.wkt;
+                    if (geomWKT) {
+                        this._map.zoomToWkt(geomWKT, 'EPSG:4326');
+                        this._map.setHighlightFeatures(geomWKT, "wkt", "EPSG:4326");
+                    } else {
+                        this._map.zoomToGeometryOrExtent(bbox.toArray());
+                    }
+
+                    $('#lizmap-search, #lizmap-search-close').removeClass('open');
+                    // trigger event containing selected feature
+                    this._lizmap3.events.triggerEvent('lizmapexternalsearchitemselected',
+                        {
+                            'feature': feat
+                        }
+                    );
+                    return false;
+                });
+            });
+
+            $('#lizmap-search-close button').click(() => {
+                this._map.clearHighlightFeatures();
+                $('#lizmap-search, #lizmap-search-close').removeClass('open');
+                return false;
+            });
+        }
+    }
+}

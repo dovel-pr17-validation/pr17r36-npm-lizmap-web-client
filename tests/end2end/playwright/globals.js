@@ -1,0 +1,469 @@
+// @ts-check
+import { expect } from '@playwright/test';
+import { URLSearchParams } from 'url';
+import { fileURLToPath } from 'url';
+import * as path from 'path';
+import { Buffer } from 'node:buffer';
+
+/**
+ * Playwright Page
+ * @typedef {import('@playwright/test').Page} Page
+ */
+
+/**
+ * Playwright APIResponse
+ * @typedef {import('@playwright/test').APIResponse} APIResponse
+ */
+
+/**
+ * Playwright APIRequestContext
+ * @typedef {import('@playwright/test').APIRequestContext} APIRequestContext
+ */
+
+/**
+ * Integer
+ * @typedef {number} int
+ */
+
+/**
+ * The file path
+ * @member string
+ */
+const __filename = fileURLToPath(import.meta.url);
+
+/**
+ * The file directory path
+ * @member string
+ * @see https://nodejs.org/docs/latest-v15.x/api/esm.html#esm_no_filename_or_dirname
+ * @see https://stackoverflow.com/questions/8817423/why-is-dirname-not-defined-in-node-repl
+ * @example
+ * import { fileURLToPath } from 'url';
+ * import { dirname } from 'path';
+ * const __filename = fileURLToPath(import.meta.url);
+ * const __dirname = dirname(__filename);
+ */
+export const __dirname = path.dirname(__filename);
+
+/**
+ * The file directory path
+ * @member string
+ */
+export const testsDirectory = path.join(__dirname, '..', '..');
+
+/**
+ * Get the current file path according the list of given arguments.
+ * @returns {string} The final file path
+ */
+export function playwrightTestFile()   {
+    let finalPath = path.join(__dirname);
+    for (let i = 0; i < arguments.length; i++) {
+        finalPath = path.join(finalPath, arguments[i]);
+    }
+    return finalPath;
+}
+
+/**
+ * Get the given QGS file path.
+ * @param {string} file_name The file name without extension
+ * @param {string} directory The directory name, default to 'tests'
+ * @returns {string} The QGS file path
+ */
+export function qgsTestFile(file_name, directory = 'tests')   {
+    return path.join(testsDirectory, 'qgis-projects', directory, file_name + '.qgs');
+}
+
+/**
+ * Get the given specific repository media folder path.
+ * @param {string} repository the repository name folder, default to 'tests'
+ * @returns {string} The repository media folder path
+ */
+export function getRepositoryMediaFolder(repository = 'tests') {
+    return path.join(testsDirectory, 'qgis-projects', repository, 'media');
+}
+
+/**
+ * Get the auth storage state path
+ * @param {string} name The file name without extension
+ * @returns {string} The path to auth storage state path
+ */
+export function getAuthStorageStatePath(name) {
+    return playwrightTestFile('.auth', name + '.json');
+}
+
+/**
+ * To transform a buffer to base64
+ * @param {Buffer} buffer The buffer to transform
+ * @returns {string} The base64 of the buffer
+ */
+export function base64Buffer(buffer) {
+    var binary = '';
+    var bytes = new Uint8Array(buffer);
+    var len = bytes.byteLength;
+    for (var i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
+
+
+const { subtle } = globalThis.crypto;
+
+/**
+ * Transform a buffer by hashing it with sha-1
+ * @param {Buffer} buff The buffer to hash
+ * @returns {Promise<string>} The hash of the buffer
+ */
+export async function digestBuffer(buff) {
+    const hashBuffer = await subtle.digest('sha-1', buff);
+    const hashArray = Array.from(new Uint8Array(hashBuffer)); // convert buffer to byte array
+    const hashHex = hashArray
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join(""); // convert bytes to hex string
+    return hashHex;
+}
+
+/**
+ * Expect no errors in the map page
+ * @param {Page} page The page object
+ * @param {boolean} checkLayerTreeView Checking  that tree view contains layers
+ */
+async function NoErrors(page, checkLayerTreeView = true) {
+    // No error
+    await expect(page.locator('p.error-msg')).toHaveCount(0);
+    if (checkLayerTreeView) {
+        await expect(page.locator('#switcher lizmap-treeview ul li')).not.toHaveCount(0);
+    }
+    // Check no error message displayed
+    await expect(page.getByText('An error occurred while loading this map. Some necessary resources may temporari')).toHaveCount(0);
+}
+
+/**
+ * Expect errors in the map page
+ * @param {Page} page The page object
+ * @param {int} layersInTreeView The number of layers to find in the tree view.
+ */
+async function CatchErrors(page, layersInTreeView = 0) {
+    // Error
+    await expect(page.locator('p.error-msg')).toHaveCount(1);
+    await expect(page.locator('#switcher .lizmap-treeview ul li')).toHaveCount(layersInTreeView);
+    // Error message displayed
+    await expect(page.getByText('An error occurred while loading this map. Some necessary resources may temporari')).toBeVisible();
+    // Go back home link
+    await expect(page.getByRole('link', { name: 'Home' })).toHaveCount(1);
+}
+
+/**
+ * Helper to load a map and do some basic checks
+ * @param {string} url The URL of the map to load
+ * @param {Page} page The page object
+ * @param {boolean} mapMustLoad If the loading of the map must be successful or not. Some error might be triggered when loading the map, on purpose.
+ * @param {int} layersInTreeView The number of layers to find in the treeview if the map is on error.
+ * @param {boolean} waitForGetLegendGraphic If the test must wait for the GetLegendGraphic request
+ * @deprecated Use Project page instead and migrate the test to use proper methods
+ */
+export async function gotoMap(url, page, mapMustLoad = true, layersInTreeView = 0, waitForGetLegendGraphic = true) {
+    // Arm request waits BEFORE navigating: GetCapabilities and GetLegendGraphic
+    // are fired during map load, so a waitForRequest set up after page.goto()
+    // (or after awaiting GetCapabilities) can miss an early request and hang
+    // until the test times out. Arming both up-front removes that race.
+
+    // Wait for GetProjectConfig promise once page opened
+    let getProjectConfigPromise = page.waitForRequest('**/service/getProjectConfig*');
+    // Wait for WMS GetCapabilities promise once page opened
+    let getCapabilitiesWMSPromise = page.waitForRequest(
+        request => request.method() === 'GET' &&
+        request.url().includes('WMS') === true &&
+        request.url().includes('GetCapabilities') === true
+    );
+    // Wait for WFS GetCapabilities promise once page opened
+    let getCapabilitiesWFSPromise = page.waitForRequest(
+        request => request.method() === 'GET' &&
+        request.url().includes('WFS') === true &&
+        request.url().includes('GetCapabilities') === true
+    );
+    // Wait for WMTS GetCapabilities promise once page opened
+    let getCapabilitiesWMTSPromise = page.waitForRequest(
+        request => request.method() === 'GET' &&
+        request.url().includes('WMTS') === true &&
+        request.url().includes('GetCapabilities') === true
+    );
+
+    // Wait for GetLegendGraphic promise once GetCapalities loaded
+    let getLegendGraphicPromise = (mapMustLoad && waitForGetLegendGraphic)
+        ? page.waitForRequest(
+            request => (
+                request.method() === 'POST' &&
+                request.postData() != null &&
+                request.postData()?.includes('GetLegendGraphic') === true
+            ) || (
+                request.method() === 'GET' &&
+                request.url().includes('GetLegendGraphic') === true
+            )
+        )
+        : null;
+
+    await expect(async () => {
+        const response = await page.goto(url);
+        expect(response?.status()).toBeLessThan(400);
+    }).toPass({
+        intervals: [1_000, 2_000, 10_000],
+        timeout: 30_000
+    });
+
+
+    // Wait for WMS, WFS, WMTS GetCapabilities
+    const requests = await Promise.all([
+        getProjectConfigPromise,
+        getCapabilitiesWMSPromise,
+        getCapabilitiesWFSPromise,
+        getCapabilitiesWMTSPromise,
+    ]);
+    // Wait for responses
+    await Promise.all(requests.map(request => request.response()));
+
+    if (mapMustLoad) {
+        if (getLegendGraphicPromise) {
+            // Wait for WMS GetLegendGraphic (promise armed before navigation)
+            await getLegendGraphicPromise;
+        }
+        // No error
+        await NoErrors(page, waitForGetLegendGraphic);
+        // Wait to be sure the map is ready
+        await page.waitForTimeout(1000)
+    } else {
+        // Wait to be sure the map is ready
+        await page.waitForTimeout(1000)
+        // Error
+        await CatchErrors(page, layersInTreeView);
+    }
+}
+
+/**
+ * Helper to reload a map and do some basic checks
+ * @param {Page} page The page object
+ * @param {boolean} check If some basic checks must be done.
+ */
+export async function reloadMap(page, check = true) {
+    // Arm request waits BEFORE reloading (see gotoMap): GetCapabilities and
+    // GetLegendGraphic fire during load, so waits set up afterwards can miss an
+    // early request and hang until the test times out.
+    let getCapabilitiesWMSPromise = page.waitForRequest(/SERVICE=WMS&REQUEST=GetCapabilities/);
+    let getLegendGraphicPromise = check
+        ? page.waitForRequest(
+            request => (
+                request.method() === 'POST' &&
+                request.postData() != null &&
+                request.postData()?.includes('GetLegendGraphic') === true
+            ) || (
+                request.method() === 'GET' &&
+                request.url().includes('GetLegendGraphic') === true
+            )
+        )
+        : null;
+
+    await expect(async () => {
+        const response = await page.reload();
+        expect(response?.status()).toBeLessThan(400);
+    }).toPass({
+        intervals: [1_000, 2_000, 10_000],
+        timeout: 60_000
+    });
+
+    // Wait for WMS GetCapabilities
+    let getCapabilitiesWMSRequest = await getCapabilitiesWMSPromise;
+    await getCapabilitiesWMSRequest.response();
+
+    if (check) {
+        // Wait for WMS GetLegendGraphic (promise armed before reload)
+        await getLegendGraphicPromise;
+        // No error
+        await NoErrors(page);
+        // Wait to be sure the map is ready
+        await page.waitForTimeout(1000)
+    } else {
+        // Error
+        await CatchErrors(page);
+    }
+}
+
+
+/**
+ * Get the last IDs when saving features as JSON
+ * @param {Page} page The page object
+ * @returns {Promise<any>} The JSON response, like {"id":"31"}
+ */
+export async function editedFeatureIds(page) {
+    const values = await page.locator('#liz_close_feature_pk_vals').inputValue();
+    return JSON.parse(values);
+}
+
+/**
+ * Re-send the request with additional "__echo__" param to retrieve the OGC Request search params
+ * @param {Page} page The page object
+ * @param {string} url The URL to re-send
+ * @returns {Promise<URLSearchParams>} List of parameters in the request
+ */
+export async function getEchoRequestParams(page, url) {
+    // Re-send the request with additional echo param to retrieve the OGC Request
+    let echoResponse = await page.request.get(url + '&__echo__');
+    const originalUrl = decodeURIComponent(await echoResponse.text());
+    // When the request has not been logged by echo proxy
+    await expect(URL.canParse(originalUrl), originalUrl+' is not an URL!').toBeTruthy();
+    await expect(originalUrl).not.toContain('unfound')
+
+    return new URLSearchParams((new URL(originalUrl).search));
+}
+
+/**
+ * Similar to "toHaveLength", but display the list of members if it fails.
+ * @param {string}   title Check title, for testing and debug
+ * @param {string[]} parameters List of parameters to check
+ * @param {int}      expectedLength Expected size length
+ * @param {string[]} expectedParameters List of expected parameters, only for debug for the print
+ */
+export async function expectToHaveLengthCompare(title, parameters, expectedLength, expectedParameters) {
+    await expect(
+        parameters,
+        `${title} → wrong length list :\n
+            Got    : ${parameters.length} items\n
+            With   : ${parameters.join(', ')}\n
+            To have: ${expectedLength} items\n
+            Debug  : ${expectedParameters.join(', ')}\n
+            Debug count : ${expectedParameters.length} items`
+    ).toHaveLength(expectedLength);
+}
+
+/**
+ * Get the JSON for the given project using the API
+ * @param {APIRequestContext} request Request to use
+ * @param {string} project The project name
+ * @param {string} repository The repository name, default to "testsrepository".
+ * @returns {Promise<any>} The JSON response
+ */
+export async function jsonFromProjectApi(request, project, repository = 'testsrepository') {
+    return await requestGETWithAdminBasicAuth(
+        request,
+        `/api.php/admin/repositories/${repository}/projects/${project}`
+    );
+}
+
+/**
+ * Get the version of QGIS written in the project
+ * @param {APIRequestContext} request Request to use
+ * @param {string} project The project name
+ * @returns {Promise<int>} The QGIS version, written as "34004" for QGIS 3.40.4, to be easily sortable.
+ */
+export async function qgisVersionFromProjectApi(request, project) {
+    const response = await jsonFromProjectApi(request, project);
+    const json = await checkJson(response);
+    return json.versionInt;
+}
+
+/**
+ * Check for a JSON response
+ * @param {APIResponse} response The response object
+ * @param {int} status The expected HTTP status code
+ * @returns {Promise<any>} The JSON response
+ */
+export async function checkJson(response, status = 200) {
+    if (status < 400){
+        expect(response.ok(), 'Status: '+response.status()+' Content: '+(await response.text())).toBeTruthy();
+    }
+    expect(response.status()).toBe(status);
+    expect(response.headers()['content-type']).toBe('application/json');
+    return await response.json();
+}
+
+/**
+ * Check parameters against an object containing expected parameters
+ * @param {string}                        title Check title, for testing and debug
+ * @param {string}                        parameters List of parameters to check
+ * @param {{[key: string]: string|RegExp}} expectedParameters List of expected parameters
+ * @returns {Promise<URLSearchParams>}    List of promise with parameters
+ */
+export async function expectParametersToContain(title, parameters, expectedParameters) {
+    const searchParams = new URLSearchParams(parameters)
+
+    await expect(
+        searchParams.size,
+        `Check "${title}" : Not enough parameters compared to expected :\n
+        Got ${searchParams.size}\n
+        Expected ${Object.keys(expectedParameters).length}\n
+        Detail got ${Array.from(searchParams.keys()).join(', ')}\n
+        Detail expected ${Object.keys(expectedParameters).join(', ')}`
+    ).toBeGreaterThanOrEqual(Object.keys(expectedParameters).length)
+
+    for (const param in expectedParameters) {
+        await expect(
+            searchParams.has(param),
+            `Check "${title}" : ${param} not in ${Array.from(searchParams.keys()).join(', ')}`
+        ).toBe(true)
+
+        const expectedValue = expectedParameters[param]
+        if (expectedValue instanceof RegExp) {
+            await expect(
+                searchParams.get(param),
+                `Title "${title}" : ${param} does not match the expected value :\nExpected "${expectedValue}"\nGot "${searchParams.get(param)}"`
+            ).toMatch(expectedValue)
+
+        } else {
+            await expect(
+                searchParams.get(param),
+                `Title "${title}" : ${param} has not the right value :\nExpected "${expectedValue}"\nGot "${searchParams.get(param)}"`
+            ).toBe(expectedValue)
+        }
+    }
+
+    return searchParams;
+}
+
+const adminPassword = "Basic " + btoa("admin:admin");
+
+/**
+ * Create a GET request on a given URL with Basic authentication admin:admin
+ * @param {APIRequestContext} request Request to use
+ * @param {string} url URL to do a GET request on
+ * @returns {Promise<APIResponse>} Response
+ */
+export async function requestGETWithAdminBasicAuth(request, url) {
+    return await request.get(url,
+        {
+            headers: {
+                authorization: adminPassword
+            }
+        });
+}
+
+/**
+ * Create a POST request on a given URL with Basic authentication admin:admin
+ * @param {APIRequestContext} request Request to use
+ * @param {string} url URL to do a POST request on
+ * @param {object} data parameters for the request
+ * @returns {Promise<APIResponse>} Response
+ */
+export async function requestPOSTWithAdminBasicAuth(request, url, data) {
+    return await request.post(url,
+        {
+            headers: {
+                authorization: adminPassword
+            },
+            data: data
+        });
+}
+
+/**
+ * Create a DELETE request on a given URL with Basic authentication admin:admin
+ * @param {APIRequestContext} request Request to use
+ * @param {string} url URL to do a DELETE request on
+ * @param {object} data parameters for the request
+ * @returns {Promise<APIResponse>} Response
+ */
+export async function requestDELETEWithAdminBasicAuth(request, url, data) {
+    return await request.delete(url,
+        {
+            headers: {
+                authorization: adminPassword
+            },
+            data: data
+        });
+}

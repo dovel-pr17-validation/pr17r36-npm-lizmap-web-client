@@ -1,0 +1,939 @@
+/**
+ * @module modules/Permalink.js
+ * @name Permalink
+ * @copyright 2023 3Liz
+ * @license MPL-2.0
+ */
+
+import { mainLizmap } from '../modules/Globals.js';
+import {transformExtent} from 'ol/proj.js';
+import { html, render } from 'lit-html';
+import { Config } from './Config.js';
+import { Utils } from './Utils.js';
+
+/**
+ * @class
+ * @name Permalink
+ */
+export default class Permalink {
+
+    /**
+     * Permalink is managed via short link
+     * @type {boolean}
+     */
+    _shortLinkPermalink;
+
+    /**
+     * Creates a Permalink instance
+     * @param {Config} initialConfig - The lizmap initial config instance
+     * @param {null|object} initialPermalink - Initial permalink startup object
+     */
+    constructor(initialConfig, initialPermalink) {
+
+        // Used to behave differently when hash is changed
+        // programmatically or by users in URL
+        this._ignoreHashChange = false;
+        // True while a permalink is being applied to the map
+        this._applyingPermalink = false;
+        // Store the build or received hash
+        this._hash = '';
+        this._extent4326 = [0, 0, 0, 0, 0];
+
+        // Don't refresh hash when map is initialized
+        this._ignoreStartupMapEvents = true;
+
+        this._shortLinkPermalink = initialConfig.options.short_link_permalink;
+
+        this._currentPermalinkId = null;
+
+        this._symbologyMap = new Map();
+
+        // initialize current permalink, if any
+        this.currentPermalinkProperties = initialPermalink;
+
+        // Change `checked`, `style` states based on URL fragment
+        if (window.location.hash) {
+            this._runPermalink(false, true);
+        }
+
+        this._historyTableTemplate = (links = [], newEntry) => html`
+            ${links && links.length ? html`
+                <div class="permalink-history-title">${lizDict['permalink.history.title']}
+                    <span
+                        id="permalink-clear-history"
+                        @click=${()=> this._clearPermalinkHistory()}>${lizDict['permalink.history.delete.all.title']}</span>
+                </div>
+                <table class='table table-sm'>
+                    <tbody>
+                        ${links.map((l,k) => {
+                            return html`<tr data-url="${l.url}" data-share="${l.link}" class="${newEntry && k== 0 ? 'new-entry' : ''}">
+                                <td>${l.link}</td>
+                                <td><a href="${l.url}" target="_blank"><i title="${lizDict['permalink.history.visit']}" class='icon-eye-open'></i></a></td>
+                                ${navigator.clipboard ? html`
+                                    <td class="permalink-copy-to-clipboard" @click=${
+                                        (e) => {
+                                            const link = e.currentTarget.parentElement.getAttribute("data-url");
+                                            this._copyToClipboard(link);
+                                        }
+                                    }>
+                                    <i title="${lizDict['permalink.history.clipboard']}" class='icon-tags'></i>
+                                </td>
+                                ` : ''}
+                                <td @click=${(e) => {
+                                    const plink = e.currentTarget.parentElement.getAttribute("data-share");
+                                    this.currentPermalinkId = plink;
+                                    return this._sharePermalink();
+                                }}><i title="${lizDict['permalink.history.share']}" class='icon-share'></i></td>
+                                <td @click=${(e) => {
+                                    const plink = e.currentTarget.parentElement.getAttribute("data-share");
+                                    if(confirm(lizDict['permalink.history.delete.single']))
+                                        return this._updatePermalinkHistory(plink,'d');
+                                }}><i title="${lizDict['permalink.history.delete.single.title']}" class='icon-trash'></i></td>
+                            </tr>`
+                            })}
+                    </tbody>
+                </table>
+            ` : ''}
+        `
+        // initialize UI
+        document.getElementById('permalink-box').style.display = this._shortLinkPermalink ? 'none' : 'block';
+        document.getElementById('permalink-generator').style.display = this._shortLinkPermalink ? 'flex' : 'none';
+        document.getElementById('permalink-back').style.display = this._shortLinkPermalink ? '' : 'none';
+
+        this._renderHistoryTemplate();
+
+        window.addEventListener(
+            "hashchange", () => {
+                // The hash has been changed by the module
+                if (this._ignoreHashChange) {
+                    this._ignoreHashChange = false;
+                    return;
+                }
+                // Received the event but the hash does not change
+                if (this._hash == window.location.hash) {
+                    return;
+                }
+                if (window.location.hash) {
+                    this._runPermalink(true);
+                }
+            }
+        );
+
+        this._updatePermalinkParameters = () => {
+            this._enableNewPermalinkButton();
+            this._writeURLFragment();
+        }
+
+        this._refreshURLsInPermalinkComponent();
+
+        // define events on UI component
+        this._attachComponentEvents();
+
+        // Refresh hash parameters when map state changes
+        mainLizmap.state.map.addListener(
+            () => {
+                if (this._ignoreStartupMapEvents) {
+                    this._ignoreStartupMapEvents = false;
+                    return;
+                }
+                this._updatePermalinkParameters();
+            }, ['map.state.changed']
+        );
+
+        // Refresh hash parameters when the selected base layer changes
+        mainLizmap.state.baseLayers.addListener(
+            () => this._updatePermalinkParameters(),
+            ['baselayers.selection.changed']
+        );
+
+        mainLizmap.state.rootMapGroup.addListener(
+            (ev) => {
+                const evtStyleChange = ev.type.indexOf("style.changed") >= 0;
+                if (this._shortLinkPermalink && evtStyleChange) {
+                    mainLizmap.state.rootMapGroup.getMapLayerByName(ev.name).removeListener(
+                        this._updatePermalinkParameters,
+                        'layer.symbol.checked.changed'
+                    );
+                    if (this._symbologyMap.get(ev.name))
+                        this._resetPermalinkSymbology(ev.name);
+                }
+                this._updatePermalinkParameters();
+            },
+            [
+                'layer.visibility.changed',
+                'group.visibility.changed',
+                'layer.style.changed',
+                'group.style.changed',
+                'layer.opacity.changed',
+                'group.opacity.changed',
+            ]
+        );
+
+        if (this._shortLinkPermalink) {
+            mainLizmap.state.rootMapGroup.addListener(
+                (ev) => {
+                    mainLizmap.state.rootMapGroup.getMapLayerByName(ev.name).addListener(
+                        this._updatePermalinkParameters,
+                        [
+                            'layer.symbol.checked.changed'
+                        ]
+                    )
+                    const item = mainLizmap.state.layersAndGroupsCollection.getLayerOrGroupByName(ev.name);
+                    this._symbologyMap.set(ev.name, true);
+                    item.symbologyInitParameters = {};
+                    this._updatePermalinkParameters();
+                }, ['layer.symbology.changed']
+            )
+        }
+    }
+
+    /**
+     * Setting the current permalink hash
+     * @param {string} permalinkId - the permalink hash
+     */
+    set currentPermalinkId(permalinkId){
+        this._currentPermalinkId = permalinkId;
+    }
+
+    /**
+     * Getting the current permalink hash
+     * @type {string}
+     */
+    get currentPermalinkId(){
+        return this._currentPermalinkId;
+    }
+
+    /**
+     * Stores the current permalink properties in local storage when short link permalink is enabled
+     * @param {object} plink - the permalink object
+     */
+    set currentPermalinkProperties(plink){
+        if(!this._shortLinkPermalink) return;
+
+        const {repository, project} = globalThis['lizUrls'].params;
+        const storedPermalink = localStorage.getItem('lizmap_p_link');
+        let updatedPermalink;
+
+        if(typeof plink === 'object' && !Array.isArray(plink) && plink !== null) {
+            if (plink.repository && plink.repository == repository && plink.project && plink.project == project) {
+                updatedPermalink = [plink];
+                if (storedPermalink) {
+                    let currentPermalinkList = JSON.parse(storedPermalink);
+                    if(Array.isArray(currentPermalinkList)) {
+                        updatedPermalink = [
+                            ...currentPermalinkList.filter(f => f.repository !== repository || f.project !== project),
+                            ...updatedPermalink,
+                        ];
+                    }
+                }
+            }
+        } else {
+            // remove current permalink instance from local storage, if any
+            if (storedPermalink) {
+                let currentPermalinkList = JSON.parse(storedPermalink);
+                if(Array.isArray(currentPermalinkList)) {
+                    updatedPermalink = currentPermalinkList.filter((f)=> f.repository != repository || f.project != project);
+                }
+            }
+        }
+        if (updatedPermalink) localStorage.setItem('lizmap_p_link', JSON.stringify(updatedPermalink));
+    }
+
+    /**
+     * Retrieves the current permalink properties from local storage
+     * @type {object}
+     */
+    get currentPermalinkProperties(){
+        let currentPermalink = null;
+        const {repository, project} = globalThis['lizUrls'].params;
+        try {
+            const storedPermalink = localStorage.getItem('lizmap_p_link');
+            if (storedPermalink) {
+
+                let currentPermalinkList = JSON.parse(storedPermalink);
+                if(Array.isArray(currentPermalinkList)) {
+                    let currentPermalinkObj = currentPermalinkList.filter((f)=> f.repository == repository && f.project == project);
+                    if(currentPermalinkObj.length == 1) {
+                        currentPermalink = currentPermalinkObj[0].plink;
+                    }
+                }
+            }
+        } catch(e) {
+            console.log(e);
+            currentPermalink = null;
+        }
+
+        return currentPermalink;
+    }
+
+    /**
+     * Stores the permalink history in the local storage
+     * @param {Array} history - the permalink records on history
+     */
+    set permalinksHistory(history){
+        localStorage.setItem('lizmap_permalink_history', JSON.stringify(history));
+    }
+
+    /**
+     * Get history records
+     * @type {Array}
+     */
+    get permalinksHistory(){
+        let storedPermalink = [];
+        const {repository, project} = globalThis['lizUrls'].params;
+        try {
+            const permalinkParameters = localStorage.getItem('lizmap_permalink_history');
+            if (permalinkParameters) {
+                let historyPermalink = JSON.parse(permalinkParameters);
+                if (historyPermalink && Array.isArray(historyPermalink)) {
+                    storedPermalink = historyPermalink.filter(f => f.repository == repository && f.project == project)
+                }
+            }
+        } catch (e) {
+            console.warn(e);
+            storedPermalink = [];
+        }
+
+        return storedPermalink;
+    }
+
+    /**
+     * Get permalink from server
+     * @param {string} permalinkId - the permalink hash
+     * @returns {Promise<object>} The permalink object or the error object
+     */
+    static async getPermalink(permalinkId){
+        const permalinkParams = new URLSearchParams({
+            o:'g',
+            id: permalinkId,
+            ...globalThis['lizUrls'].params
+        })
+
+        let permalinkData;
+        try {
+            permalinkData = await Utils.fetchJSON(globalThis['lizUrls'].short_link_permalink + '?' + permalinkParams);
+        } catch(e) {
+            permalinkData = { error: [e.message]};
+        }
+
+        return permalinkData;
+    }
+
+    /**
+     * Copy the permalink link to clipboard
+     * @param {string} link - the permalink url
+     * @returns {void}
+     */
+    _copyToClipboard(link){
+        navigator.clipboard.writeText(link).then(() => {
+        });
+    }
+
+    /**
+     * Renders the history template on client
+     * @param {string} mode - update mode, 'a' = permalink added, 'd' = permalink deletes, '' = refresh only
+     * @returns {void}
+     */
+    _renderHistoryTemplate(mode = '') {
+        if (this._shortLinkPermalink) {
+            render(this._historyTableTemplate(this.permalinksHistory, mode == 'a'), document.getElementById('permalink-history'));
+        }
+    }
+
+    /**
+     * Enables the add paermalink button.
+     * @returns {void}
+     */
+    _enableNewPermalinkButton(){
+        if (!this._shortLinkPermalink) return;
+        document.getElementById('lizmap-new-permalink').disabled = false;
+        document.getElementById('lizmap-new-permalink').innerText = lizDict['permalink.new'];
+    }
+
+    /**
+     * Defines events on UI components
+     * @returns {void}
+     */
+    _attachComponentEvents(){
+        // Handle events on permalink component
+        // close minidock
+        const btnPermalinkClear = document.querySelector('.btn-permalink-clear');
+
+        if (btnPermalinkClear) {
+            btnPermalinkClear.addEventListener('click', () => document.getElementById('button-permaLink').click());
+        }
+
+        // change embed iframe size
+        const selectEmbedPermalink = document.getElementById('select-embed-permalink');
+
+        if (selectEmbedPermalink) {
+            selectEmbedPermalink.addEventListener('change', event => {
+                document.getElementById('span-embed-personalized-permalink').classList.toggle('hide', event.target.value !== 'p')
+                this._refreshURLsInPermalinkComponent();
+            });
+        }
+
+        // custom iframe size
+        document.querySelectorAll('#input-embed-width-permalink, #input-embed-height-permalink').forEach(input =>
+            input.addEventListener('input', () => this._refreshURLsInPermalinkComponent())
+        );
+
+        // Geobookmarks (only for logged in users)
+        const geobookmarkForm = document.getElementById('geobookmark-form');
+
+        if (geobookmarkForm) {
+            this._bindGeobookmarkEvents();
+
+            geobookmarkForm.addEventListener('submit', async event => {
+                event.preventDefault();
+                const bname = document.querySelector('#geobookmark-form input[name="bname"]').value;
+                if (bname == '') {
+                    lizMap.addMessage(lizDict['geobookmark.name.required'], 'danger', true);
+                    return false;
+                }
+                let permalink = null;
+                if (this._shortLinkPermalink) {
+                    permalink = await this._addShortLinkPermalink();
+                    if(!permalink) return;
+                }
+                const gbparams = {};
+                gbparams['project'] = globalThis['lizUrls'].params.project;
+                gbparams['repository'] = globalThis['lizUrls'].params.repository;
+                gbparams['hash'] = this._shortLinkPermalink ? `#permalink=${permalink}` : this._hash;
+                gbparams['name'] = bname;
+                gbparams['q'] = 'add';
+                fetch(globalThis['lizUrls'].geobookmark, {
+                    method: "POST",
+                    body: new URLSearchParams(gbparams)
+                }).then(response => {
+                    return response.text();
+                }).then( data => {
+                    this._setGeobookmarkContent(data);
+                });
+            });
+        }
+
+        // If geobookmark is the same than the hash there is
+        // no `hashchange` event. In this case we run permalink
+        document.querySelectorAll('.btn-geobookmark-run').forEach(button => {
+            button.addEventListener('click', event => {
+                if (decodeURIComponent(window.location.hash) === event.currentTarget.getAttribute('href')) {
+                    this._runPermalink(true);
+                }
+            });
+        });
+
+        // short link permalink
+        if (this._shortLinkPermalink) {
+            const backToLinkGenerator = document.getElementById('permalink-back');
+            backToLinkGenerator.addEventListener('click', () => {
+                document.getElementById('permalink-box').style.display = 'none';
+                document.getElementById('permalink-generator').style.display = 'flex';
+            })
+
+            const newPermalinkButton = document.getElementById('lizmap-new-permalink');
+            if(newPermalinkButton) {
+                newPermalinkButton.addEventListener('click', e => {
+                    this._createNewPermalink(e);
+                })
+            }
+        }
+    }
+
+    /**
+     * Updates the local permalink history
+     * @param {string} plink - the permalink hash
+     * @param {string} mode - update mode, 'a' = add, 'd' = delete, '' = refresh only
+     * @returns {void}
+     */
+    _updatePermalinkHistory(plink, mode){
+        const {repository, project} = globalThis['lizUrls'].params;
+        let permalinkList = this.permalinksHistory;
+        const isOnHistory = permalinkList.filter((e)=> e.link == plink);
+        if(!isOnHistory.length) {
+            if (mode == 'a') {
+                permalinkList.unshift({
+                    link: plink,
+                    repository: repository,
+                    project:project,
+                    url: this._getShortLinkPermalinkUrl(plink),
+                })
+            }
+            // keep only 20 items per tuple (repository, project)
+            permalinkList = permalinkList.slice(0,20);
+        } else {
+            // order history
+            permalinkList = [ ...(mode == 'd' ? [] : isOnHistory), ...permalinkList.filter((e)=> e.link != plink)]
+
+        }
+        this.permalinksHistory = permalinkList;
+        this._renderHistoryTemplate(mode);
+    }
+
+    /**
+     * Returns the permalink url
+     * @returns {string} The permalink url
+     */
+    _getShortLinkPermalinkUrl(plink){
+        return window.location.origin
+            + window.location.pathname
+            + '?'
+            + new URLSearchParams(globalThis['lizUrls'].params)
+            + "#permalink="+plink;
+    }
+
+    /**
+     * Removes permalink history from local storage
+     * @returns {void}
+     */
+    _clearPermalinkHistory(){
+        if(confirm(lizDict['permalink.history.delete.all'])) {
+            localStorage.removeItem('lizmap_permalink_history');
+            this._renderHistoryTemplate();
+        }
+    }
+
+    /**
+     * Reset current permalink symbology information
+     * @param {string} layerName the layer name
+     * @returns {void}
+     */
+    _resetPermalinkSymbology(layerName){
+        let currentPermalink = this.currentPermalinkProperties;
+        const {repository, project} = globalThis['lizUrls'].params;
+        this._symbologyMap.set(layerName, false);
+        const nameEncoded = encodeURIComponent(layerName);
+        if(currentPermalink && currentPermalink.layers && currentPermalink.symbology) {
+            const layerIndex = currentPermalink.layers.indexOf(nameEncoded);
+            if(layerIndex > -1) {
+                currentPermalink.symbology[layerIndex] = '';
+                const item = mainLizmap.state.layersAndGroupsCollection.getLayerOrGroupByName(layerName);
+
+                item.symbologyInitParameters = {};
+            }
+        }
+
+        this.currentPermalinkProperties = {repository:repository, project:project, plink:{...currentPermalink}};
+    }
+
+    /**
+     * Creates a new permalink short link and updates UI.
+     * @param {Event} e - click event
+     * @returns {void}
+     */
+    async _createNewPermalink(e){
+        e.preventDefault();
+        document.getElementById('lizmap-new-permalink').disabled = true;
+        const permalink = await this._addShortLinkPermalink();
+
+        if(permalink) {
+            this.currentPermalinkId = permalink;
+            this._updatePermalinkHistory(permalink, 'a');
+            if(navigator.clipboard) {
+                this._copyToClipboard(this._getShortLinkPermalinkUrl(permalink));
+                document.getElementById('lizmap-new-permalink').innerText = lizDict['permalink.clipboard'];
+            } else {
+                this._sharePermalink();
+            }
+        } else {
+            document.getElementById('lizmap-new-permalink').disabled = false;
+        }
+    }
+
+    /**
+     * Adds a new short link permalink for the given repository and project
+     * @returns {Promise<null|string>} The permalink hash or null in case of errors
+     */
+    async _addShortLinkPermalink(){
+        let permalinkParams = new URLSearchParams({
+            o: 'add',
+            repository: globalThis['lizUrls'].params.repository,
+            project: globalThis['lizUrls'].params.project
+        });
+
+        // capture the current permalink properties
+        this._writeURLFragment();
+        let permalinkData;
+        // send request to the server
+        try {
+            permalinkData = await Utils.fetchJSON(globalThis['lizUrls'].short_link_permalink + '?' + permalinkParams,{
+                method:'POST',
+                headers: {
+                    'Content-Type': 'application/json;charset=utf-8'
+                },
+                body: JSON.stringify({
+                    permalink:{...this.currentPermalinkProperties}
+                })
+            })
+            if(permalinkData && permalinkData.permalink){
+                return permalinkData.permalink;
+            } else {
+                mainLizmap.displayMessage(permalinkData.error.reduce((p,c)=> p + '\n' + c,''), 'danger', true);
+                return null;
+            }
+        } catch (e) {
+            mainLizmap.displayMessage(e.message, 'danger', true);
+            return null;
+        }
+    }
+
+    /**
+     * Updates component UI for share functionality
+     * @returns {void}
+     */
+    _sharePermalink(){
+        document.getElementById('permalink-box').style.display = 'block';
+        document.getElementById('permalink-generator').style.display = 'none';
+        this._refreshURLsInPermalinkComponent()
+    }
+
+    _setGeobookmarkContent(gbData) {
+        // set content
+        $('div#geobookmark-container').html(gbData);
+        // unbind previous click events
+        $('div#geobookmark-container button').unbind('click');
+        // Bind events
+        this._bindGeobookmarkEvents();
+        // Remove bname val
+        $('#geobookmark-form input[name="bname"]').val('').blur();
+    }
+
+    _bindGeobookmarkEvents() {
+        document.querySelectorAll('.btn-geobookmark-del').forEach(button => {
+            button.addEventListener('click', () => {
+                if (confirm(lizDict['geobookmark.confirm.delete'])) {
+                    var gbid = button.value;
+                    this._removeGeoBookmark(gbid);
+                }
+            });
+        });
+    }
+
+    _removeGeoBookmark(id) {
+        var gbparams = {
+            id: id,
+            q: 'del',
+            repository: globalThis['lizUrls'].params.repository,
+            project: globalThis['lizUrls'].params.project
+        };
+
+        fetch(globalThis['lizUrls'].geobookmark + '?' + new URLSearchParams(gbparams)).then(response => {
+            return response.text();
+        }).then( data => {
+            this._setGeobookmarkContent(data);
+        });
+    }
+
+    /**
+     * Runs the permalink to update the map
+     * @param {boolean} setExtent - whether set the map extent or not
+     * @param {boolean} useInitialPermalink - whether ignore permalink hash and use initial permalink
+     * @returns {Promise<void>}
+     */
+    async _runPermalink(setExtent, useInitialPermalink = false) {
+        if (this._hash === ''+window.location.hash) {
+            return;
+        }
+        if (window.location.hash === "") {
+            this._hash = '';
+            return;
+        }
+
+        this._hash = ''+window.location.hash;
+        // Hold the fragment while the whole permalink is applied, see
+        // _writeURLFragment()
+        this._applyingPermalink = true;
+        try {
+            await this._applyPermalink(setExtent, useInitialPermalink);
+        } finally {
+            this._applyingPermalink = false;
+        }
+    }
+
+    /**
+     * Applies the values of the current permalink to the map
+     * @param {boolean} setExtent - whether set the map extent or not
+     * @param {boolean} useInitialPermalink - whether ignore permalink hash and use initial permalink
+     * @returns {Promise<void>}
+     */
+    async _applyPermalink(setExtent, useInitialPermalink) {
+        if (this._shortLinkPermalink && this._hash.indexOf('#permalink=') == 0){
+            if(!useInitialPermalink) {
+                const shortLink = window.location.hash.substring(1).split('=')[1];
+                if (shortLink) {
+                    const permalink = await this.constructor.getPermalink(shortLink);
+                    if (!permalink) return;
+                    if(permalink.hasOwnProperty('error')) {
+                        mainLizmap.displayMessage(permalink.error.reduce((p,c) => p + '\n' + c,''),'danger',true);
+                        // remove permalink from local storage
+                        this._updatePermalinkHistory(shortLink,'d');
+                    } else {
+                        this.currentPermalinkProperties = permalink;
+                    }
+                }
+            }
+
+            if (mainLizmap.config.options.automatic_permalink) {
+                history.replaceState(null, '', window.location.pathname + window.location.search +'#map_status');
+            } else history.replaceState(null, '', window.location.pathname + window.location.search)
+        }
+
+        // items are layers then groups from leaf to root
+        const items = mainLizmap.state.layersAndGroupsCollection.layers.concat(
+            mainLizmap.state.layersAndGroupsCollection.groups.reverse() // reverse groups array to get from leaf to root
+        );
+
+        const [extent4326, itemsInURL, stylesInURL, opacitiesInURL, symbologyInUrl, baseLayerInURL] = this._getPermalinkValues();
+
+        // Restore the selected base layer, if any is stored in the permalink
+        if (baseLayerInURL) {
+            const baseLayerName = decodeURIComponent(baseLayerInURL);
+            const baseLayersState = mainLizmap.state.baseLayers;
+            if (baseLayersState.baseLayerNames.includes(baseLayerName)) {
+                baseLayersState.selectedBaseLayerName = baseLayerName;
+            }
+        }
+
+        if (setExtent
+            && extent4326
+            && extent4326.length === 4
+            && this._extent4326.filter((v, i) => {return parseFloat(extent4326[i]).toPrecision(6) != v}).length != 0) {
+            const mapExtent = transformExtent(
+                extent4326.map(coord => parseFloat(coord)),
+                'EPSG:4326',
+                lizMap.map.projection.projCode
+            );
+            this._extent4326 = extent4326.map(coord => parseFloat(coord).toPrecision(6));
+            mainLizmap.extent = mapExtent;
+        }
+
+        if (itemsInURL && itemsInURL.length != 0) {
+            for (const item of items){
+                if(itemsInURL && itemsInURL.includes(encodeURIComponent(item.name))){
+                    const itemIndex = itemsInURL.indexOf(encodeURIComponent(item.name));
+                    item.checked = true;
+                    if (item.type === 'layer' && stylesInURL[itemIndex] !== undefined) {
+                        item.wmsSelectedStyleName = decodeURIComponent(stylesInURL[itemIndex]);
+                    }
+                    if (opacitiesInURL[itemIndex]) {
+                        item.opacity = parseFloat(opacitiesInURL[itemIndex]);
+                    }
+                    if (symbologyInUrl && symbologyInUrl[itemIndex]) {
+                        // if symbology is already loaded, update its checked state
+                        if (this._symbologyMap.get(item.name)) {
+                            item.setSymbologyCheckedStateFromParameters(symbologyInUrl[itemIndex]);
+                        } else {
+                            // store info
+                            item.symbologyInitParameters = symbologyInUrl[itemIndex];
+                        }
+                    }
+                } else {
+                    item.checked = false;
+                }
+            }
+        }
+    }
+
+    /**
+     * Parse permalink hash
+     * @returns {Array} The array of permalink parameters
+     */
+    _getPermalinkValues(){
+        if (this._shortLinkPermalink) {
+            let permalinkValues = Array(6);
+            try {
+                let currentPermalink = this.currentPermalinkProperties;
+                if (currentPermalink) {
+                    permalinkValues = [
+                        currentPermalink.bbox,
+                        currentPermalink.layers ?? null,
+                        currentPermalink.styles ?? null,
+                        currentPermalink.opacities ?? null,
+                        currentPermalink.symbology ?? null,
+                        currentPermalink.baselayer ?? null,
+                    ]
+                }
+            } catch(e){
+                console.warn(e)
+            }
+
+            return permalinkValues;
+        } else {
+            // Classic hash format: bbox|layers|styles|opacities|baselayer
+            // (symbology is only used with short link permalinks)
+            const parts = window.location.hash.substring(1).split('|').map(part => part.split(','));
+            const baseLayer = (parts[4] && parts[4][0]) ? parts[4][0] : null;
+            return [parts[0], parts[1] ?? null, parts[2] ?? null, parts[3] ?? null, null, baseLayer];
+        }
+    }
+
+    // Set URL in permalink component's input
+    _refreshURLsInPermalinkComponent() {
+        const inputSharePermalink = document.getElementById('input-share-permalink');
+        const permalink = document.getElementById('permalink');
+        const selectEmbedPermalink = document.getElementById('select-embed-permalink');
+        const inputEmbedPermalink = document.getElementById('input-embed-permalink');
+
+        var searchParams = {
+            repository: globalThis['lizUrls'].params.repository,
+            project: globalThis['lizUrls'].params.project
+        };
+        if (this._hash === '') {
+            const urlParameters = (new URL(window.location)).searchParams;
+            if (urlParameters.has('bbox')) {
+                searchParams['bbox'] = urlParameters.get('bbox');
+            }
+            if (urlParameters.has('crs')) {
+                searchParams['crs'] = urlParameters.get('crs');
+            }
+        }
+
+        const permalinkValue = window.location.origin
+            + window.location.pathname
+            + '?'
+            + new URLSearchParams(searchParams)
+            + (this._shortLinkPermalink ? "#permalink="+this.currentPermalinkId : this._hash);
+
+        if (inputSharePermalink) {
+            inputSharePermalink.value = permalinkValue;
+        }
+        if (permalink) {
+            permalink.href = permalinkValue;
+        }
+        if (selectEmbedPermalink) {
+            const iframeSize = selectEmbedPermalink.value;
+            let width = 0;
+            let height = 0;
+
+            if ( iframeSize === 's' ) {
+                width = 400;
+                height = 300;
+            } else if ( iframeSize === 'm' ) {
+                width = 600;
+                height = 450;
+            } else if (iframeSize === 'l') {
+                width = 800;
+                height = 600;
+            } else if (iframeSize === 'p') {
+                width = document.getElementById('input-embed-width-permalink').value;
+                height = document.getElementById('input-embed-height-permalink').value;
+            }
+
+            let embedURL = window.location.href.replace('/map?','/embed?');
+            if (this._shortLinkPermalink) {
+                embedURL = embedURL.split('#')[0] + "#permalink="+this.currentPermalinkId;
+            }
+
+            inputEmbedPermalink.value = `<iframe width="${width}" height="${height}" frameborder="0" style="border:0" src="${embedURL}" allowfullscreen></iframe>`;
+        }
+    }
+
+    /**
+     * Writes the hash.
+     * If the short link permalink functionality is enabled, stores the permalink information in the local storage
+     * @returns {void}
+     */
+    _writeURLFragment() {
+        // Don't write initial permalink if waiting for first theme to be applied
+        if (this._suspendInitialWrite) {
+            return;
+        }
+        // Don't write while a permalink is being applied: setting the extent
+        // dispatches "map.state.changed", which lands here before the layers have
+        // been restored, and the fragment would then be rewritten from a half
+        // applied state - silently replacing the permalink being opened.
+        if (this._applyingPermalink) {
+            return;
+        }
+
+        let hash;
+
+        // BBOX
+        let bbox = mainLizmap.extent;
+        if (lizMap.map.projection.projCode !== 'EPSG:4326') {
+            bbox = transformExtent(
+                bbox,
+                lizMap.map.projection.projCode,
+                'EPSG:4326'
+            );
+        }
+        this._extent4326 = bbox.map(x => x.toFixed(6));
+        hash = this._extent4326.join();
+
+        // Item's visibility, style and opacity
+        // Only write layer's properties when visible
+        let itemsVisibility = [];
+        let itemsStyle = [];
+        let itemsOpacity = [];
+        let itemsSymbology = [];
+
+        for (const item of mainLizmap.state.rootMapGroup.findMapLayersAndGroups()) {
+            if (item.checked){
+                itemsVisibility.push(encodeURIComponent(item.name));
+                itemsStyle.push(item.wmsSelectedStyleName ? encodeURIComponent(item.wmsSelectedStyleName) : item.wmsSelectedStyleName);
+                itemsOpacity.push(item.opacity);
+                if (this._shortLinkPermalink) {
+                    if (item.symbology && item.symbology.wmsParameters) {
+                        const symbologyParameters = item.symbology.wmsParameters(item.name);
+                        if(symbologyParameters && Object.keys(symbologyParameters).length) {
+                            itemsSymbology.push(symbologyParameters);
+                        } else itemsSymbology.push('');
+                    } else itemsSymbology.push('')
+                }
+            }
+        }
+
+        // Currently selected base layer (may be null when no base layer is defined)
+        const selectedBaseLayerName = mainLizmap.state.baseLayers.selectedBaseLayerName;
+
+        if (selectedBaseLayerName) {
+            // The base layer is stored as the last (5th) segment of the hash.
+            // Always emit the layers/styles/opacities segments (even when empty)
+            // so the base layer keeps a fixed position and stays readable when
+            // no overlay layer is visible.
+            hash += '|' + itemsVisibility.join()
+                 +  '|' + itemsStyle.join()
+                 +  '|' + itemsOpacity.join()
+                 +  '|' + encodeURIComponent(selectedBaseLayerName);
+        } else {
+            if (itemsVisibility.length) {
+                hash += '|' + itemsVisibility.join();
+            }
+
+            if (itemsStyle.length) {
+                hash += '|' + itemsStyle.join();
+            }
+
+            if (itemsOpacity.length) {
+                hash += '|' + itemsOpacity.join();
+            }
+        }
+
+        // Saved new hash
+        this._hash = '#'+hash;
+        // Finally override URL fragment
+        if(this._shortLinkPermalink) {
+            const {repository, project} = globalThis['lizUrls'].params;
+            const hashParams = {}
+            hashParams.bbox = this._extent4326;
+            if (itemsVisibility.length) hashParams.layers = itemsVisibility;
+            if (itemsStyle.length) hashParams.styles = itemsStyle;
+            if (itemsOpacity.length) hashParams.opacities = itemsOpacity;
+            if (itemsSymbology.length) hashParams.symbology = itemsSymbology;
+            if (selectedBaseLayerName) hashParams.baselayer = encodeURIComponent(selectedBaseLayerName);
+
+            this.currentPermalinkProperties = {repository: repository, project: project, plink: hashParams};
+        }
+
+        if (mainLizmap.initialConfig.options.automatic_permalink) {
+            if (this._shortLinkPermalink) {
+                history.replaceState(null, '', window.location.pathname + window.location.search +'#map_status');
+            } else {
+                this._ignoreHashChange = true;
+                window.location.hash = hash;
+            }
+        }
+
+        this._refreshURLsInPermalinkComponent();
+    }
+}

@@ -1,0 +1,40 @@
+<div>
+  {if $title}
+  <h3>{$title}</h3>
+  {else}
+  <h3>{@view~edition.modal.title.default@}</h3>
+  {/if}
+</div>
+
+{jmessage_bootstrap}
+
+{form $form, "lizmap~edition:saveFeature", array(), "htmlbootstrap",
+        array("errorDecorator"=>"lizEditionErrorDecorator",
+              "plugins"=>$formPlugins,
+              "attributes"=>array('data-new-feature-action'=>$ajaxNewFeatureUrl,
+                                  'data-evaluate-defaults-action'=>$ajaxEvaluateDefaultsUrl),
+              "widgetsAttributes" => $widgetsAttributes
+        )}
+
+{if $attributeEditorForm}
+
+    {fetchtpl 'view~edition_form_container',
+            array('container'=>$attributeEditorForm,
+                  'groupVisibilities'=>$groupVisibilities)}
+
+{else}
+    {formcontrols $fieldNames}
+    <div class="form-group row mb-2 align-items-center">
+        <div class="col-3 jforms-label-col text-end">{ctrl_label}</div>
+        <div class="col-9 jforms-control-col">{ctrl_control}</div>
+    </div>
+    {/formcontrols}
+{/if}
+
+
+    <div class="form-group row mb-2 align-items-center">
+        <div class="col-3 jforms-label-col text-end">{ctrl_label "liz_future_action"}</div>
+        <div class="col-9 jforms-control-col">{ctrl_control "liz_future_action"}</div>
+    </div>
+    <div class="jforms-submit-buttons form-actions">{formreset}{formsubmit}</div>
+{/form}

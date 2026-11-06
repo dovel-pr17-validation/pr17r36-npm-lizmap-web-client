@@ -1,0 +1,75 @@
+<?php
+
+use Lizmap\Request\WFSRequest;
+
+class WFSRequestForTests extends WFSRequest
+{
+    public $datasource;
+
+    public $selectFields;
+
+    public $qgisLayer;
+
+    public $appContext;
+
+    public function __construct() {}
+
+    public function getFeatureIdFilterExpForTests($featureid, $typename, $qgisLayer)
+    {
+        return $this->getFeatureIdFilterExp($featureid, $typename, $qgisLayer);
+    }
+
+    public function buildQueryBaseForTests($cnx, $params, $wfsFields)
+    {
+        return $this->buildQueryBase($cnx, $params, $wfsFields);
+    }
+
+    public function getDatasourceSqlForTests()
+    {
+        return $this->getDatasourceSql();
+    }
+
+    public function getBboxSqlForTests($params)
+    {
+        return $this->getBboxSql($params);
+    }
+
+    public function parseExpFilterForTests($cnx, $params)
+    {
+        return $this->parseExpFilter($cnx, $params);
+    }
+
+    public function getWhereClauseForTests($cnx, $params)
+    {
+        $this->params = $params;
+
+        return $this->getWhereClause($cnx, $params);
+    }
+
+    public function parseFeatureIdForTests($cnx, $params)
+    {
+        $this->params = $params;
+
+        return $this->parseFeatureId($cnx, $params);
+    }
+
+    public function getQueryOrderForTests($cnx, $params, $wfsFields)
+    {
+        return $this->getQueryOrder($cnx, $params, $wfsFields);
+    }
+
+    public function validateFilterForTests($filter)
+    {
+        return $this->validateFilter($filter);
+    }
+
+    public function setGeojsonSqlForTests($sql, $cnx, $typename, $geometryname, int $outputSrid = 4326)
+    {
+        return $this->setGeojsonSql($sql, $cnx, $typename, $geometryname, $outputSrid);
+    }
+
+    public function parseSrsnameSridForTests(string $srsname): ?int
+    {
+        return $this->parseSrsnameSrid($srsname);
+    }
+}

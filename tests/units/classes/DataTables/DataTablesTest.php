@@ -1,0 +1,409 @@
+<?php
+
+use Lizmap\DataTables\DataTables;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * @internal
+ *
+ * @coversNothing
+ */
+class DataTablesTest extends TestCase
+{
+    public function testConvertCriteriaToExpression(): void
+    {
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '=',
+            'value1' => 'test',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" = \'test\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '!=',
+            'value1' => '1',
+            'type' => 'num',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" != 1');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '<',
+            'value1' => '1.5',
+            'type' => 'num',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" < 1.5');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '<=',
+            'value1' => 2,
+            'type' => 'num',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" <= 2');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '>',
+            'value1' => 0.5,
+            'type' => 'num',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" > 0.5');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '>=',
+            'value1' => 'C',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" >= \'C\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => 'starts',
+            'value1' => 'test',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" ILIKE \'test%\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '!starts',
+            'value1' => 'test',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" NOT ILIKE \'test%\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => 'contains',
+            'value1' => 'test',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" ILIKE \'%test%\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '!contains',
+            'value1' => 'test',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" NOT ILIKE \'%test%\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => 'ends',
+            'value1' => 'test',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" ILIKE \'%test\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '!ends',
+            'value1' => 'test',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" NOT ILIKE \'%test\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => 'null',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" IS NULL');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '!null',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" IS NOT NULL');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => 'between',
+            'value1' => 'a',
+            'value2' => 'd',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" BETWEEN \'a\' AND \'d\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '!between',
+            'value1' => 'a',
+            'value2' => 'd',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" NOT BETWEEN \'a\' AND \'d\'');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => 'between',
+            'value1' => 0,
+            'value2' => 5,
+            'type' => 'num',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" BETWEEN 0 AND 5');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'condition' => '!between',
+            'value1' => '0',
+            'value2' => '5',
+            'type' => 'num',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" NOT BETWEEN 0 AND 5');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'type' => 'string',
+            'condition' => '=',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"name" = \'\'');
+
+        // Column names with uppercase letters must be enclosed in double quotes
+        // so PostgreSQL does not fold the identifier to lower case.
+        $criteria = array(
+            'data' => 'Flur',
+            'origData' => 'Flur',
+            'condition' => '=',
+            'value1' => '510',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"Flur" = \'510\'');
+
+        // A double quote inside a column name must be doubled (escaped).
+        $criteria = array(
+            'data' => 'weird"col',
+            'origData' => 'weird"col',
+            'condition' => '=',
+            'value1' => 'x',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '"weird""col" = \'x\'');
+    }
+
+    public function testInvalidConvertCriteriaToExpression(): void
+    {
+        $criteria = array(
+            'type' => '',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '');
+
+        $criteria = array(
+            'data' => 'Name',
+            'type' => '',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'type' => '',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '');
+
+        $criteria = array(
+            'data' => 'Name',
+            'origData' => 'name',
+            'type' => 'string',
+        );
+        $exp = DataTables::convertCriteriaToExpression($criteria);
+        $this->assertEquals($exp, '');
+    }
+
+    public function testConvertSearchToExpression(): void
+    {
+        $search = array(
+            'criteria' => array(
+                array(
+                    'data' => 'Name',
+                    'origData' => 'name',
+                    'condition' => '=',
+                    'value1' => 'test',
+                    'type' => 'string',
+                ),
+            ),
+        );
+        $exp = DataTables::convertSearchToExpression($search);
+        $this->assertEquals($exp, '"name" = \'test\'');
+
+        $search = array(
+            'criteria' => array(
+                array(
+                    'data' => 'Name',
+                    'origData' => 'name',
+                    'condition' => '>=',
+                    'value1' => 'a',
+                    'type' => 'string',
+                ),
+                array(
+                    'data' => 'Name',
+                    'origData' => 'name',
+                    'condition' => '<=',
+                    'value1' => 'd',
+                    'type' => 'string',
+                ),
+            ),
+        );
+        $exp = DataTables::convertSearchToExpression($search);
+        $this->assertEquals($exp, '"name" >= \'a\' AND "name" <= \'d\'');
+
+        $search = array(
+            'criteria' => array(
+                array(
+                    'data' => 'Name',
+                    'origData' => 'name',
+                    'condition' => 'starts',
+                    'value1' => 'test',
+                    'type' => 'string',
+                ),
+                array(
+                    'data' => 'Name',
+                    'origData' => 'name',
+                    'condition' => 'ends',
+                    'value1' => 'test',
+                    'type' => 'string',
+                ),
+            ),
+            'logic' => 'OR',
+        );
+        $exp = DataTables::convertSearchToExpression($search);
+        $this->assertEquals($exp, '"name" ILIKE \'test%\' OR "name" ILIKE \'%test\'');
+
+        // test complex subconditions
+        $search = array(
+            'criteria' => array(
+                array(
+                    'criteria' => array(
+                        array(
+                            'data' => 'Surname',
+                            'origData' => 'surname',
+                            'condition' => 'starts',
+                            'value1' => 'sub',
+                            'type' => 'string',
+                        ),
+                        array(
+                            'data' => 'Surname',
+                            'origData' => 'surname',
+                            'condition' => 'starts',
+                            'value1' => 'liz',
+                            'type' => 'string',
+                        ),
+                        array(
+                            'criteria' => array(
+                                array(
+                                    'data' => 'Age',
+                                    'origData' => 'age',
+                                    'condition' => '=',
+                                    'value1' => '22',
+                                    'type' => 'num',
+                                ),
+                                array(
+                                    'data' => 'Age',
+                                    'origData' => 'age',
+                                    'condition' => '=',
+                                    'value1' => '23',
+                                    'type' => 'num',
+                                ),
+                                array(
+                                    'data' => 'Age',
+                                    'origData' => 'age',
+                                    'condition' => '=',
+                                    'value1' => '45',
+                                    'type' => 'num',
+                                ),
+                            ),
+                            'logic' => 'OR',
+                        ),
+                    ),
+                    'logic' => 'OR',
+                ),
+                array(
+                    'data' => 'Name',
+                    'origData' => 'name',
+                    'condition' => '=',
+                    'value1' => 'test',
+                    'type' => 'string',
+                ),
+                array(
+                    'data' => 'Location',
+                    'origData' => 'location',
+                    'condition' => 'ends',
+                    'value1' => 'ce',
+                    'type' => 'string',
+                ),
+                array(
+                    'criteria' => array(
+                        array(
+                            'data' => 'Year',
+                            'origData' => 'year',
+                            'condition' => '=',
+                            'value1' => '2025',
+                            'type' => 'num',
+                        ),
+                        array(
+                            'data' => 'Year',
+                            'origData' => 'year',
+                            'condition' => '=',
+                            'value1' => '2026',
+                            'type' => 'num',
+                        ),
+                    ),
+                    'logic' => 'OR',
+                ),
+            ),
+            'logic' => 'AND',
+        );
+
+        $exp = DataTables::convertSearchToExpression($search);
+        $this->assertEquals($exp, '("surname" ILIKE \'sub%\' OR "surname" ILIKE \'liz%\' OR ("age" = 22 OR "age" = 23 OR "age" = 45)) AND "name" = \'test\' AND "location" ILIKE \'%ce\' AND ("year" = 2025 OR "year" = 2026)');
+    }
+}

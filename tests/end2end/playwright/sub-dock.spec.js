@@ -1,0 +1,678 @@
+// @ts-check
+import { dirname } from 'path';
+import * as fs from 'fs/promises'
+import { existsSync } from 'node:fs';
+import { test, expect } from '@playwright/test';
+import { expect as requestExpect } from './fixtures/expect-request.js';
+import { expect as responseExpect } from './fixtures/expect-response.js';
+import { playwrightTestFile } from './globals';
+import { ProjectPage } from "./pages/project";
+
+// To update OSM and GeoPF tiles in the mock directory
+// IMPORTANT, this must not be set to `true` while committing, on GitHub. Set to `false`.
+const UPDATE_MOCK_FILES = false;
+
+test.describe('Sub dock @readonly', () => {
+
+    test('Test base layers opacities', async ({ page }) => {
+
+        await page.route('https://tile.openstreetmap.org/*/*/*.png', async (route) => {
+            const request = await route.request();
+            //GetTiles.push(request.url());
+
+            // Build path file in mock directory
+            const pathFile = playwrightTestFile('mock', 'base_layers', 'osm', 'tiles' + (new URL(request.url()).pathname));
+            if (UPDATE_MOCK_FILES) {
+                // Save file in mock directory
+                const response = await route.fetch();
+                await fs.mkdir(dirname(pathFile), { recursive: true })
+                await fs.writeFile(pathFile, new Uint8Array(await response.body()));
+            } else if (existsSync(pathFile)) {
+                // fulfill route's request with mock file
+                await route.fulfill({
+                    path: pathFile
+                })
+            } else {
+                // fulfill route's request with default transparent tile
+                await route.fulfill({
+                    path: playwrightTestFile('mock', 'transparent_tile.png')
+                })
+            }
+        });
+        // Screenshot the map without the sub-dock overlay, which shares the same bounding box as #newOlMap
+        /** @returns {Promise<Buffer>} */
+        const mapScreenshot = async () => {
+            // Hide all elements but #newOlMap and their children
+            await page.$eval("*", el => el.style.visibility = 'hidden');
+            await page.$eval("#newOlMap, #newOlMap *", el => el.style.visibility = 'visible');
+            const buf = await page.locator('#newOlMap').screenshot();
+            await page.$eval("*", el => el.style.visibility = '');
+            return buf;
+        };
+
+        const project = new ProjectPage(page, 'base_layers');
+        await project.open();
+
+        // Check base layers
+        await expect(page.locator('lizmap-base-layers select option')).toHaveCount(11);
+        await expect(page.locator('lizmap-base-layers select')).toHaveValue('osm-mapnik');
+
+        // Display base layer metadata
+        await expect(page.locator('#sub-dock')).toBeHidden();
+        await page.locator('#get-baselayer-metadata').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Opacity');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(0)).toHaveText('osm-mapnik');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(1)).toHaveText('Layer');
+        await expect(page.locator('#sub-dock .btn-opacity-layer.active')).toHaveText('100');
+
+        // Get osm-mapnik 100 rendering (screenshot limited to map element, not affected by sub-dock)
+        let buffer = await mapScreenshot();
+        const osm100ByteLength = buffer.byteLength;
+
+        // Change opacity for osm-mapnik to 60
+        await page.locator('#sub-dock .btn-opacity-layer', { hasText: '60' }).click();
+        await expect(page.locator('#sub-dock .btn-opacity-layer.active')).toHaveText('60');
+
+        // Get osm-mapnik 60 rendering
+        buffer = await mapScreenshot();
+        const osm60ByteLength = buffer.byteLength;
+        expect(osm60ByteLength).toBeLessThan(osm100ByteLength);
+
+        // Change base layer to quartiers_baselayer
+        let getMapRequestPromise = page.waitForRequest(/REQUEST=GetMap/);
+        await page.locator('lizmap-base-layers select').selectOption('quartiers_baselayer');
+        await expect(page.locator('lizmap-base-layers select')).toHaveValue('quartiers_baselayer');
+        // Wait for request and response
+        let getMapRequest = await getMapRequestPromise;
+        await getMapRequest.response();
+        // Check GetMap request
+        const getMapExpectedParameters = {
+            'SERVICE': 'WMS',
+            'VERSION': '1.3.0',
+            'REQUEST': 'GetMap',
+            'FORMAT': /^image\/png/,
+            'TRANSPARENT': /\b(\w*^true$\w*)\b/gmi,
+            'LAYERS': 'quartiers_baselayer',
+            'CRS': 'EPSG:3857',
+            'STYLES': '',
+            'WIDTH': '958',
+            'HEIGHT': '633',
+            'BBOX': /412967.3\d+,5393197.8\d+,449580.6\d+,5417390.1\d+/,
+        }
+        requestExpect(getMapRequest).toContainParametersInUrl(getMapExpectedParameters);
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Opacity');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(0)).toHaveText('quartiers_baselayer');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(1)).toHaveText('Layer');
+        await expect(page.locator('#sub-dock .btn-opacity-layer.active')).toHaveText('100');
+
+        // Get quartiers_baselayer 100 rendering
+        buffer = await mapScreenshot();
+        const quartiers100ByteLength = buffer.byteLength;
+
+        // Change opacity for quartiers_baselayer to 20
+        await page.locator('#sub-dock .btn-opacity-layer', { hasText: '20' }).click();
+        await expect(page.locator('#sub-dock .btn-opacity-layer.active')).toHaveText('20');
+
+        // Get quartiers_baselayer 20 rendering
+        buffer = await mapScreenshot();
+        const quartiers20ByteLength = buffer.byteLength;
+        expect(quartiers20ByteLength).toBeLessThan(quartiers100ByteLength);
+
+        // Back to osm-mapnik
+        await page.locator('lizmap-base-layers select').selectOption('osm-mapnik');
+        await expect(page.locator('lizmap-base-layers select')).toHaveValue('osm-mapnik');
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Opacity');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(0)).toHaveText('osm-mapnik');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(1)).toHaveText('Layer');
+        await expect(page.locator('#sub-dock .btn-opacity-layer.active')).toHaveText('60');
+
+        // Check osm-mapnik 60 buffer
+        buffer = await mapScreenshot();
+        expect(buffer.byteLength).toBeLessThan(osm100ByteLength);
+        expect(buffer.byteLength).toBe(osm60ByteLength);
+
+        // Close sub-dock
+        await expect(page.locator('#hide-sub-dock')).toBeVisible();
+        await page.locator('#hide-sub-dock').click();
+        await expect(page.locator('#sub-dock')).toBeHidden();
+
+        // Back to quartiers_baselayer
+        await page.locator('lizmap-base-layers select').selectOption('quartiers_baselayer');
+        await expect(page.locator('lizmap-base-layers select')).toHaveValue('quartiers_baselayer');
+
+        // Display base layer metadata
+        await expect(page.locator('#sub-dock')).toBeHidden();
+        await page.locator('#get-baselayer-metadata').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Opacity');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(0)).toHaveText('quartiers_baselayer');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(1)).toHaveText('Layer');
+        await expect(page.locator('#sub-dock .btn-opacity-layer.active')).toHaveText('20');
+
+        // Check quartiers_baselayer 20 buffer
+        buffer = await mapScreenshot();
+        expect(buffer.byteLength).toBeLessThan(quartiers100ByteLength);
+        expect(buffer.byteLength).toBe(quartiers20ByteLength);
+
+        // Remove listen to osm tiles
+        await page.unroute('https://tile.openstreetmap.org/*/*/*.png');
+    });
+
+    test('Metadata layer in attribute table project', async ({ page }) => {
+        const project = new ProjectPage(page, 'attribute_table');
+        await project.open();
+
+        // Display info button
+        await expect(page.getByTestId('Les quartiers à Montpellier').locator('.icon-info-sign')).toBeHidden();
+        await page.getByTestId('Les quartiers à Montpellier').hover();
+        await expect(page.getByTestId('Les quartiers à Montpellier').locator('.icon-info-sign')).toBeVisible();
+
+        // Display sub dock metadata
+        await expect(page.locator('#sub-dock')).toBeHidden();
+        await page.getByTestId('Les quartiers à Montpellier').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(5);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Opacity');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(4)).toHaveText('Export');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd')).toHaveCount(5);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(0)).toHaveText('Les quartiers à Montpellier');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(1)).toHaveText('Layer');
+
+        //close sub dock
+        await expect(page.locator('#hide-sub-dock')).toBeVisible();
+        await page.locator('#hide-sub-dock').click();
+        await expect(page.locator('#sub-dock')).toBeHidden();
+
+        // Display sub dock metadata for group
+        await page.getByTestId('relation').locator('> div.group > div.node').hover();
+        await expect(page.getByTestId('relation').locator('> div.group > div.node .icon-info-sign')).toBeVisible();
+        await page.getByTestId('relation').locator('> div.group > div.node .icon-info-sign').click();
+        await expect(page.locator('#hide-sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Opacity');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(0)).toHaveText('relation');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd').nth(1)).toHaveText('Group');
+
+        //close sub dock
+        await expect(page.locator('#hide-sub-dock')).toBeVisible();
+        await page.locator('#hide-sub-dock').click();
+        await expect(page.locator('#sub-dock')).toBeHidden();
+    });
+
+    test('Metadata one on two layers in WFS with attribute table config', async ({ page }) => {
+        const project = new ProjectPage(page, 'permalink');
+        await project.open();
+
+        // Display sub dock metadata for layer in WFS with multiple styles
+        await page.getByTestId('sousquartiers').hover();
+        await page.getByTestId('sousquartiers').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(6);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Change layer style');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(4)).toHaveText('Opacity');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(5)).toHaveText('Export');
+
+        // Display sub dock metadata for layer not in WFS and no multiple styles
+        await page.getByTestId('Les quartiers à Montpellier').hover();
+        await page.getByTestId('Les quartiers à Montpellier').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Opacity');
+    });
+
+    test('Export layer with attribute table config', async ({ page }) => {
+        const project = new ProjectPage(page, 'permalink');
+        await project.open();
+
+        // Display sub dock metadata
+        await page.getByTestId('sousquartiers').hover();
+        await page.getByTestId('sousquartiers').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Export
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(6);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(5)).toHaveText('Export');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer')).toHaveCount(1);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toHaveCount(1);
+
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer option')).toHaveCount(12);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+
+        await page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer').selectOption('GeoJSON');
+        const getFeatureRequestPromise = project.waitForGetFeatureRequest();
+        await page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer').click();
+        const getFeatureRequest = await getFeatureRequestPromise;
+        const expectedParameters = {
+            'SERVICE': 'WFS',
+            'REQUEST': 'GetFeature',
+            'VERSION': '1.0.0',
+            'OUTPUTFORMAT': 'GeoJSON',
+            'TYPENAME': 'sousquartiers',
+        };
+        requestExpect(getFeatureRequest).toContainParametersInPostData(expectedParameters);
+        const response = await getFeatureRequest.response();
+
+        // check response
+        expect(response?.ok()).toBeTruthy();
+        expect(response?.status()).toBe(200);
+        // check content-type header
+        expect(response?.headers()['content-type']).toContain('application/vnd.geo+json');
+    });
+
+    test('Metadata one on two layers in WFS without attribute table config', async ({ page }) => {
+        // Remove attribute table config
+        await page.route('**/service/getProjectConfig*', async route => {
+            const response = await route.fetch();
+            const json = await response.json();
+            json.attributeLayers = {};
+            await route.fulfill({ response, json });
+        });
+
+        const project = new ProjectPage(page, 'permalink');
+        await project.open();
+
+        // Remove listen to GetProjectConfig
+        await page.unroute('**/service/getProjectConfig*');
+
+        // Display sub dock metadata for layer in WFS with multiple styles
+        await page.getByTestId('sousquartiers').hover();
+        await page.getByTestId('sousquartiers').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(6);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Change layer style');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(4)).toHaveText('Opacity');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(5)).toHaveText('Export');
+
+        // Display sub dock metadata for layer not in WFS and no multiple styles
+        await page.getByTestId('Les quartiers à Montpellier').hover();
+        await page.getByTestId('Les quartiers à Montpellier').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Opacity');
+    });
+
+    test('Export layer without attribute table config', async ({ page }) => {
+        // Remove attribute table config
+        await page.route('**/service/getProjectConfig*', async route => {
+            const response = await route.fetch();
+            const json = await response.json();
+            json.attributeLayers = {};
+            await route.fulfill({ response, json });
+        });
+
+        const project = new ProjectPage(page, 'permalink');
+        await project.open();
+
+        await page.unroute('**/service/getProjectConfig*');
+
+        // Display sub dock metadata
+        await page.getByTestId('sousquartiers').hover();
+        await page.getByTestId('sousquartiers').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Export
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(6);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(5)).toHaveText('Export');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer')).toHaveCount(1);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toHaveCount(1);
+
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer option')).toHaveCount(12);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+
+        await page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer').selectOption('GeoJSON');
+        const getFeatureRequestPromise = project.waitForGetFeatureRequest();
+        await page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer').click();
+        const getFeatureRequest = await getFeatureRequestPromise;
+        const expectedParameters = {
+            'SERVICE': 'WFS',
+            'REQUEST': 'GetFeature',
+            'VERSION': '1.0.0',
+            'OUTPUTFORMAT': 'GeoJSON',
+            'TYPENAME': 'sousquartiers',
+        };
+        requestExpect(getFeatureRequest).toContainParametersInPostData(expectedParameters);
+        const response = await getFeatureRequest.response();
+
+        // check response
+        expect(response?.ok()).toBeTruthy();
+        expect(response?.status()).toBe(200);
+        // check content-type header
+        expect(response?.headers()['content-type']).toContain('application/vnd.geo+json');
+    });
+
+    test('Export layer with attribute table config but not for one with WFS', async ({ page }) => {
+        // [Bug]: TypeError: l is undefined` in switcher-layers-actions.js when opening
+        // the layer info (i) panel, if the project has attribute table layers
+        // https://github.com/3liz/lizmap-web-client/issues/7374
+        const project = new ProjectPage(page, 'feature_toolbar');
+        await project.open();
+
+        // Display sub dock metadata for tramway_stops - Attribute table config
+        await page.getByTestId('tramway_stops').hover();
+        await page.getByTestId('tramway_stops').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Export
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(5);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(4)).toHaveText('Export');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer')).toHaveCount(1);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toHaveCount(1);
+
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer option')).toHaveCount(12);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+
+        //close sub dock
+        await expect(page.locator('#hide-sub-dock')).toBeVisible();
+        await page.locator('#hide-sub-dock').click();
+        await expect(page.locator('#sub-dock')).toBeHidden();
+
+        // Display sub dock metadata for parent_layer_without_attribute_table - No Attribute table config but WFS
+        await page.getByTestId('parent_layer_without_attribute_table').hover();
+        await page.getByTestId('parent_layer_without_attribute_table').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Export
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(5);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(4)).toHaveText('Export');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer')).toHaveCount(1);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toHaveCount(1);
+
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer option')).toHaveCount(12);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+
+        //close sub dock
+        await expect(page.locator('#hide-sub-dock')).toBeVisible();
+        await page.locator('#hide-sub-dock').click();
+        await expect(page.locator('#sub-dock')).toBeHidden();
+
+        // Display sub dock metadata for parent_layer - Attribute table config
+        await page.getByTestId('parent_layer').hover();
+        await page.getByTestId('parent_layer').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Export
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(6);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(4)).toHaveText('Export');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer')).toHaveCount(1);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toHaveCount(1);
+
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer option')).toHaveCount(12);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+    });
+
+    test('Export layer with limit export format', async ({ page }) => {
+        // Catch GetProjectConfig to override export_enabled for selection layer
+        await page.route('**/service/getProjectConfig*', async route => {
+            const response = await route.fetch();
+            const json = await response.json();
+            json.attributeLayers['sousquartiers']['export_formats']  = ['xlsx', 'csv', 'ods'];
+            await route.fulfill({ response, json });
+        });
+
+        const project = new ProjectPage(page, 'permalink');
+        await project.open();
+
+        // Remove catching GetProjectConfig
+        await page.unroute('**/service/getProjectConfig*');
+
+        // Display sub dock metadata
+        await page.getByTestId('sousquartiers').hover();
+        await page.getByTestId('sousquartiers').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Export
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(6);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(5)).toHaveText('Export');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer')).toHaveCount(1);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toHaveCount(1);
+
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer option')).toHaveCount(3);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+    });
+
+    test('Export layer with max export features', async ({ page }) => {
+        // Catch GetProjectConfig to override export_max_features for sousquartiers layer
+        await page.route('**/service/getProjectConfig*', async route => {
+            const response = await route.fetch();
+            const json = await response.json();
+            json.attributeLayers['sousquartiers']['export_max_features'] = 2;
+            await route.fulfill({ response, json });
+        });
+
+        const project = new ProjectPage(page, 'permalink');
+        await project.open();
+
+        // Remove catching GetProjectConfig
+        await page.unroute('**/service/getProjectConfig*');
+
+        // Display sub dock metadata
+        await page.getByTestId('sousquartiers').hover();
+        await page.getByTestId('sousquartiers').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Export
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(6);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(5)).toHaveText('Export');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer')).toHaveCount(1);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toHaveCount(1);
+
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd select.exportLayer option')).toHaveCount(12);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeDisabled();
+
+        // Open attribute table
+        const tableName = 'sousquartiers'
+        let datatablesRequest = await project.openAttributeTable(tableName);
+        let datatablesResponse = await datatablesRequest.response();
+        responseExpect(datatablesResponse).toBeJson();
+
+        // Check table lines
+        const tableHtml = project.attributeTableHtml(tableName);
+        await expect(tableHtml.locator('tbody tr')).toHaveCount(31);
+        await expect(tableHtml.locator('tbody tr.selected')).toHaveCount(0);
+
+        // Use line with id 2
+        let tr2 = tableHtml.locator('tbody tr[id="2"]');
+
+        // Select feature
+        // click on select Button
+        let getSelectionTokenRequestPromise = project.waitForGetSelectionTokenRequest();
+        await tr2.locator('lizmap-feature-toolbar .feature-select').click();
+        let getSelectionTokenRequest = await getSelectionTokenRequestPromise;
+        // Once the GetSelectionToken is received, the map is refreshed
+        responseExpect(await getSelectionTokenRequest.response()).toBeJson();
+
+        // Export button enabled
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+
+        // Use line with id 3
+        let tr3 = tableHtml.locator('tbody tr[id="3"]');
+
+        // Select feature
+        // click on select Button
+        getSelectionTokenRequestPromise = project.waitForGetSelectionTokenRequest();
+        await tr3.locator('lizmap-feature-toolbar .feature-select').click();
+        getSelectionTokenRequest = await getSelectionTokenRequestPromise;
+        // Once the GetSelectionToken is received, the map is refreshed
+        responseExpect(await getSelectionTokenRequest.response()).toBeJson();
+
+        // Export button still enabled
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+
+        // Use line with id 1
+        let tr1 = tableHtml.locator('tbody tr[id="1"]');
+
+        // Select feature
+        // click on select Button
+        getSelectionTokenRequestPromise = project.waitForGetSelectionTokenRequest();
+        await tr1.locator('lizmap-feature-toolbar .feature-select').click();
+        getSelectionTokenRequest = await getSelectionTokenRequestPromise;
+        // Once the GetSelectionToken is received, the map is refreshed
+        responseExpect(await getSelectionTokenRequest.response()).toBeJson();
+
+        // Export button bakc disabled
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeDisabled();
+
+        // Unselect feature 3
+        // click on select Button
+        getSelectionTokenRequestPromise = project.waitForGetSelectionTokenRequest();
+        await tr3.locator('lizmap-feature-toolbar .feature-select').click();
+        getSelectionTokenRequest = await getSelectionTokenRequestPromise;
+        // Once the GetSelectionToken is received, the map is refreshed
+        responseExpect(await getSelectionTokenRequest.response()).toBeJson();
+
+        // Export button still enabled
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+
+        //close sub dock
+        await expect(page.locator('#hide-sub-dock')).toBeVisible();
+        await page.locator('#hide-sub-dock').click();
+        await expect(page.locator('#sub-dock')).toBeHidden();
+
+        // Display sub dock metadata for Les quartiers à Montpellier
+        await expect(page.locator('#sub-dock')).toBeHidden();
+        await page.getByTestId('Les quartiers à Montpellier').hover();
+        await page.getByTestId('Les quartiers à Montpellier').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(4);
+        // No export
+        await expect(
+            page.locator('#sub-dock .sub-metadata .menu-content dt').filter({ hasText: 'Export' })
+        ).toHaveCount(0);
+
+        //close sub dock
+        await expect(page.locator('#hide-sub-dock')).toBeVisible();
+        await page.locator('#hide-sub-dock').click();
+        await expect(page.locator('#sub-dock')).toBeHidden();
+
+        // Reopen sub dock metadata for sousquartiers
+        await page.getByTestId('sousquartiers').hover();
+        await page.getByTestId('sousquartiers').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(6);
+        // With export
+        await expect(
+            page.locator('#sub-dock .sub-metadata .menu-content dt').filter({ hasText: 'Export' })
+        ).toHaveCount(1);
+        // And export button still enabled
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeEnabled();
+
+        // Unselect all
+        await project.attributeTableActionBar(tableName).locator('.btn-unselect-attributeTable').click();
+
+        // Export button still is disabled
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dd button.exportLayer')).toBeDisabled();
+    });
+
+    test('Metadata one on two layers in WFS with export disable in attribute table config', async ({ page }) => {
+        // Remove attribute table config
+        await page.route('**/service/getProjectConfig*', async route => {
+            const response = await route.fetch();
+            const json = await response.json();
+            json.attributeLayers.sousquartiers.export_enabled = 'False';
+            await route.fulfill({ response, json });
+        });
+
+        const project = new ProjectPage(page, 'permalink');
+        await project.open();
+
+        // Remove listen to GetProjectConfig
+        await page.unroute('**/service/getProjectConfig*');
+
+        // Display sub dock metadata for layer in WFS with multiple styles
+        await page.getByTestId('sousquartiers').hover();
+        await page.getByTestId('sousquartiers').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(5);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Change layer style');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(4)).toHaveText('Opacity');
+
+        // Display sub dock metadata for layer not in WFS and no multiple styles
+        await page.getByTestId('Les quartiers à Montpellier').hover();
+        await page.getByTestId('Les quartiers à Montpellier').locator('.icon-info-sign').click();
+        await expect(page.locator('#sub-dock')).toBeVisible();
+
+        // Check sub dock metadata content
+        await expect(page.locator('#sub-dock .sub-metadata h3 .text')).toHaveText('Information');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt')).toHaveCount(4);
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(0)).toHaveText('Name');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(1)).toHaveText('Type');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(2)).toHaveText('Zoom to the layer extent');
+        await expect(page.locator('#sub-dock .sub-metadata .menu-content dt').nth(3)).toHaveText('Opacity');
+    });
+});

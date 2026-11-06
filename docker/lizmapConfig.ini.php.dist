@@ -1,0 +1,54 @@
+;<?php exit(''); ?>
+;for security reasons , don't remove or modify the first line
+
+hideSensitiveServicesProperties=1
+
+;Services
+;list the different map services (servers, generic parameters, etc.)
+[services]
+;URL to QGIS Server for OGC web services
+wmsServerURL="http://127.0.0.1/cgi-bin/qgis_mapserv.fcgi"
+;WMS subdomain URLs list (optional)
+wmsPublicUrlList=
+;URL to the API exposed by the Lizmap plugin for QGIS Server if needed
+lizmapPluginAPIURL=
+
+onlyMaps=0
+defaultRepository=
+defaultProject=
+
+; cache configuration for tiles
+cacheStorageType=file
+;cacheStorageType=sqlite => store cached images in one sqlite file per repo/project/layer
+;cacheStorageType=file => store cached images in one folder per repo/project/layer. The root folder is /tmp/
+;cacheStorageType=redis => store cached images through redis
+cacheRedisHost=localhost
+cacheRedisPort=6379
+cacheRedisDb=
+cacheRedisKeyPrefix=
+; default cache expiration : the default time to live of data, in seconds.
+; 0 means no expiration, max : 2592000 seconds (30 days)
+cacheExpiration=0
+
+; debug mode
+; on = print debug messages in lizmap/var/log/messages.log
+; off = no lizmap debug messages
+debugMode=0
+
+; cache root directory where cache files will be stored
+; must be writable
+cacheRootDirectory="/tmp/"
+
+allowUserAccountRequests=off
+
+; path to find repositories
+rootRepositories=/srv/projects
+
+; Use relative path
+relativeWMSPath=true
+
+; The option to defined the logger log level.
+; The default log level is error.
+; You can change it to debug, info, notice, warning, error, critical, alert, emergency
+; as defined by PSR-3: Logger Interface  https://www.php-fig.org/psr/psr-3/#5-psrlogloglevel
+; logLevel="error"
